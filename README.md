@@ -10,12 +10,21 @@ This repo is used to share ideas, designs, and prototypes between team members d
 - Architecture diagrams
 - Proof of concepts
 - Research findings
+- Benchmark testing results
 - Implementation notes
 
 ## Structure
 
 ```
 .
+├── benchmark/       # Performance benchmarks and testing results
+│   ├── README.md
+│   ├── benchmark_test.go
+│   ├── custom_evaluator.go
+│   ├── run_benchmark.sh
+│   ├── analyze_results.py
+│   ├── EXPECTED_RESULTS.md
+│   └── FAIRNESS_ANALYSIS.md
 ├── design/          # Design documents and architecture proposals
 │   └── spicedb_evaluation.md
 └── README.md
