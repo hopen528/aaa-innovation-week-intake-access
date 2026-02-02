@@ -1097,6 +1097,16 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
 
 ## Future Extension Benefits (CEL Advantage)
 
+**Week 1+ - Add Product Scoping (Scoped API Keys):**
+```javascript
+// Just add product field to request context - zero code changes to evaluator!
+request.product == 'logs'  // Only allow logs
+// or
+request.product in ['logs', 'metrics']  // Allow logs and metrics
+// or combine with IP
+request.product == 'logs' && ip(request.source_ip).in_cidr('10.0.0.0/8')
+```
+
 **Week 2 - Add Country Blocking:**
 ```javascript
 // Just change the expression - zero code changes!
