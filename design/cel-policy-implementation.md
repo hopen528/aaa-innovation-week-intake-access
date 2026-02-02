@@ -193,88 +193,21 @@ RestrictionPolicyKey {
 
 ## Implementation Plan - Innovation Week
 
-### Day 1: Simplified API + UI Implementation
-**Goal:** Create clean IP policy API in rbac-public and build UI for policy management
+### Day 1: API + UI Implementation
+**Goal:** Create IP policy API and management UI
 
-**Backend API (rbac-public):**
-- [x] Research existing Zoltron implementation (COMPLETED)
-- [x] Choose architecture approach (Reuse existing model) (COMPLETED)
-- [x] Add "api_key" as valid resource type in namespace (COMPLETED)
-  - Created `domains/aaa/libs/access/namespace/yaml/api-key.yaml`
-  - Defined relations: `allowed_ip` (whitelist) and `blocked_ip` (blacklist)
-  - Updated `domains/aaa/libs/access/namespace/BUILD.bazel` to include new YAML
-- [x] Build and verify changes compile (COMPLETED)
-  - `bazel build //domains/aaa/libs/access/namespace:go_default_library` ✅
-- [x] Create simplified IP policy API (COMPLETED)
-  - **3 Consolidated Endpoints:**
-    - `POST /api/v1/orgs/{org_uuid}/ip-policies` - Create policy
-    - `GET /api/v1/orgs/{org_uuid}/ip-policies?resource_id={id}` - List/filter policies
-    - `DELETE /api/v1/orgs/{org_uuid}/ip-policies/{policy_id}` - Delete policy
-  - **Simple JSON format:** `{resource_id, blocked_cidrs, allowed_cidrs, mode}`
-  - **Backend translation:** Generates CEL expressions from CIDR lists automatically
-  - **Mode encoding:** Embedded in object_id as `expr-{uuid}-{mode}` (disabled/dry_run/enforced)
-- [x] Implement FRAMES notification support (COMPLETED)
-  - Created `domains/aaa/apps/apis/rbac-public/internal/frames/` package
-  - Codec for RestrictionPolicyKey serialization
-  - Notifier for incremental policy updates
-  - Integration in IPPolicyController to notify on create/delete
-- [x] File structure (COMPLETED)
-  - `internal/restrictionpolicy/ip_policy.go` - HTTP handlers and service
-  - `internal/restrictionpolicy/module.go` - Dependency injection + notifier registration
-  - `internal/frames/types.go` - FRAMES types (RestrictionPolicyKey, Codec)
-  - `internal/frames/notifier.go` - FRAMES notifier implementation
-  - `internal/frames/codec.go` - Serialization for restriction policy keys
-- [x] Test API endpoints (COMPLETED)
-  - Created org-wide policies (`resource_id: "*"`)
-  - Created key-specific policies (`resource_id: "key-123"`)
-  - Verified CEL expression generation
-  - Verified FRAMES notifications sent
-- [x] Build successfully (COMPLETED)
-  - `make build` in rbac-public ✅
-  - All compilation errors fixed
+- [x] Add "api_key" resource type to namespace
+- [x] Create 3 API endpoints in rbac-public
+  - `POST /api/v1/orgs/{org_uuid}/ip-policies` - Create with `{resource_id, blocked_cidrs, allowed_cidrs, mode}`
+  - `GET /api/v1/orgs/{org_uuid}/ip-policies` - List/filter by resource_id
+  - `DELETE /api/v1/orgs/{org_uuid}/ip-policies/{id}` - Delete
+- [x] Backend generates CEL expressions from CIDR lists
+- [x] FRAMES notification on policy create/delete
+- [x] UI at `/organization-settings/ip-policies` with table, add/edit/delete
+- [x] Contextual UI in API key detail modal
+- [x] API integration hooks in web-ui
 
-**Frontend UI (web-ui):**
-- [x] Create main IP Policies management page (COMPLETED)
-  - **Location:** `/organization-settings/ip-policies`
-  - **Files:**
-    - `javascript/datadog/organization-settings/components/ip-policies/PageIpPolicies/`
-    - `packages/apps/organization-settings/toolkit/ip-policies/IpPoliciesTable/`
-    - `packages/apps/organization-settings/toolkit/ip-policies/IpPolicyAddModal/`
-    - `packages/apps/organization-settings/toolkit/ip-policies/IpPolicyEditModal/`
-  - **Features:**
-    - Table showing all policies (org-wide and per-key)
-    - Create policies with resource_id selection
-    - Edit and delete policies
-    - Color-coded mode badges (enforced/dry_run/disabled)
-- [x] Create contextual IP policy view in API key details (COMPLETED)
-  - **Location:** Within API key detail modal (Organization Settings → API Keys → [View Key])
-  - **Files:**
-    - `packages/apps/organization-settings/toolkit/ip-policies/ApiKeyIpPolicies/`
-  - **Features:**
-    - Shows IP restrictions for specific key only
-    - Add policy button pre-fills resource_id with current key
-    - Inline display of blocked/allowed CIDRs
-    - Edit/delete directly from key context
-- [x] Create API integration hooks (COMPLETED)
-  - **Files:**
-    - `packages/api/endpoints/core-access/api-v1-orgs-ip-policies.get.ts`
-    - `packages/api/endpoints/core-access/api-v1-orgs-ip-policies.post.ts`
-    - `packages/api/endpoints/core-access/api-v1-orgs-ip-policies-id.delete.ts`
-  - React Query hooks for GET/POST/DELETE
-  - Automatic org UUID resolution from current user
-  - Cache invalidation on mutations
-- [x] Register routes and navigation (COMPLETED)
-  - Added `ORG_SETTINGS_ROUTE_IP_POLICIES` constant
-  - Registered route in `organization-settings.routes.tsx`
-  - Added "IP Policies" nav item in Security section
-  - Feature flag gated: `ip_policies`
-  - Permission required: `org_management`
-
-**Deliverable:**
-- ✅ Clean API for creating IP policies with automatic CEL generation
-- ✅ FRAMES integration for real-time policy distribution
-- ✅ Full UI for policy management (main page + contextual view)
-- ✅ End-to-end flow: UI → API → RelationTuples → FRAMES
+**Deliverable:** End-to-end IP policy management (API + UI + FRAMES)
 
 ### Day 2: CEL Evaluator in AuthN Sidecar
 **Goal:** Evaluate IP policies with CEL expressions
