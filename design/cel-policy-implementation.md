@@ -24,9 +24,9 @@ Build an **IP-based access control system** using CEL (Common Expression Languag
 **Key Insight:** Zoltron restriction policies **already stream to FRAMES** - we just need to store CEL expressions in RelationTuples and evaluate them!
 
 **Innovation Week Demo:**
-1. Create IP block policy via Zoltron API (CEL expression)
-2. Policy stored as RelationTuples → automatically streams to FRAMES
-3. AuthN sidecar evaluates with CEL engine (~20μs)
+1. Create IP block policy via rbac-public API (generates CEL expression)
+2. Policy stored as RelationTuples in Zoltron → automatically streams to FRAMES
+3. AuthN sidecar evaluates with CEL engine (~0.4μs)
 4. Blocked request → 403 Forbidden
 
 **Critical Performance Requirement:**
@@ -741,6 +741,9 @@ func (i *ipValue) InCIDR(cidr string) bool {
 }
 
 // LoadPolicies loads RelationTuples from FRAMES and compiles CEL expressions
+// Called on startup and when FRAMES sends policy updates.
+// Compilation (~35μs per policy) happens once here, then compiled programs
+// are cached for fast evaluation (~0.4μs per request).
 // Note: FRAMES contexts are keyed by (orgID, resourceType, resourceID)
 // The authenticator-intake knows the orgID from EdgeAuthResult and loads
 // the appropriate policies for that org from FRAMES at startup.
@@ -768,7 +771,9 @@ func (e *CELEvaluator) LoadPolicies(tuples []*RelationTuple) error {
         // Format: "expr-{uuid}-{mode}" where mode is: disabled | dryrun | enforced
         mode := parsePolicyMode(tuple.ObjectID)
 
-        // Compile CEL expression
+        // Compile CEL expression (~35μs - one-time cost)
+        // This expensive operation happens once here, then the compiled
+        // program is cached for millions of fast evaluations (~0.4μs each)
         ast, issues := e.env.Compile(expression)
         if issues != nil && issues.Err() != nil {
             return fmt.Errorf("failed to compile expression for api_key:%s: %w", subjectID, issues.Err())
@@ -780,6 +785,7 @@ func (e *CELEvaluator) LoadPolicies(tuples []*RelationTuple) error {
             return fmt.Errorf("failed to create program for api_key:%s: %w", subjectID, err)
         }
 
+        // Cache compiled program for fast evaluation
         policies[subjectID] = &PolicyProgram{
             Program:  prg,
             Mode:     mode,
@@ -935,6 +941,8 @@ func (e *CELEvaluator) evaluatePolicy(policy *PolicyProgram, subjectID string, c
 }
 
 // AddPolicy adds or updates a single policy (for incremental FRAMES updates)
+// Only compiles the changed policy (~35μs), not the entire set.
+// This keeps the compilation cost minimal during updates.
 func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
     e.mu.Lock()
     defer e.mu.Unlock()
@@ -949,7 +957,7 @@ func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
     // Parse mode from object_id
     mode := parsePolicyMode(tuple.ObjectID)
 
-    // Compile CEL expression
+    // Compile CEL expression (~35μs for this one policy only)
     ast, issues := e.env.Compile(expression)
     if issues != nil && issues.Err() != nil {
         return issues.Err()
@@ -960,6 +968,7 @@ func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
         return err
     }
 
+    // Update cache with newly compiled program
     e.policies[subjectID] = &PolicyProgram{
         Program:  prg,
         Mode:     mode,
@@ -1075,7 +1084,7 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
 ## Implementation Status
 
 **Current Phase:** Day 1 Complete ✅
-**Next:** Day 2 - Zoltron API + CEL Evaluator
+**Next:** Day 2 - CEL Evaluator + Integration
 **Started:** Innovation Week 2026
 
 ## Future Extension Benefits (CEL Advantage)
