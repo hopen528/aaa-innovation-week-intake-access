@@ -209,99 +209,75 @@ RestrictionPolicyKey {
 
 **Deliverable:** End-to-end IP policy management (API + UI + FRAMES)
 
-### Day 2: CEL Evaluator in AuthN Sidecar
-**Goal:** Evaluate IP policies with CEL expressions
+### Day 2: CEL Evaluator + Integration
+**Goal:** Build evaluator and integrate into authenticator-intake
 
-- [ ] Create CEL evaluator (300 lines)
-  - Initialize CEL environment with custom IP functions
-  - Map of API key → compiled CEL program + metadata
-  - Load and compile expressions from FRAMES
-- [ ] Load RelationTuples from FRAMES (libcontext)
-- [ ] Parse RelationTuples and compile CEL expressions
-- [ ] Parse mode from object_id (disabled/dry_run/enforced)
-- [ ] Implement evaluation logic
-  - Build request context (source IP, etc.)
-  - Evaluate CEL expression
-  - Handle three policy modes (disabled/dry_run/enforced)
-  - Return AccessDecision with dry_run metadata
-- [ ] Add metrics for policy evaluation (by mode)
-- [ ] Test with various CEL expressions
-- [ ] Test all three modes (disabled/dry_run/enforced)
+- [ ] Create CEL evaluator in authenticator-intake
+  - Initialize CEL environment with custom IP functions (`ip().in_cidr()`)
+  - Load RelationTuples from FRAMES (libcontext)
+  - Compile CEL expressions, parse mode from object_id
+  - Implement evaluation logic for 3 modes (disabled/dry_run/enforced)
+- [ ] Wire into request handler
+  - Call `CheckAccess()` in authenticator-intake flow
+  - Handle both org-wide (*) and key-specific policies
+  - Fail open on errors
+- [ ] Add metrics and logging
+  - Evaluation latency, block rates by mode
+  - Dry run "would block" tracking
+- [ ] Local testing
+  - Create test policies via UI
+  - Verify CEL expressions evaluate correctly
+  - Test all 3 modes and mode transitions
+  - Verify ~20μs performance
 
-**Deliverable:** AuthN sidecar can evaluate IP policies in ~20μs with CEL flexibility and three-state policy modes
+**Deliverable:** Working CEL evaluator in authenticator-intake with local testing complete
 
-### Day 3: Intake Use Cases & Integration
-**Goal:** Implement IP blocking with CEL evaluator
+### Day 3: Staging Deployment & Validation
+**Goal:** Deploy to staging and validate end-to-end
 
-- [ ] Create IP block policies in Zoltron (generates CEL expressions)
-- [ ] Test CEL expressions
-  - Simple IP blocking: `!ip(request.source_ip).in_cidr('1.2.3.0/24')`
-  - Multiple CIDRs: `!(ip(request.source_ip).in_cidr('1.2.3.0/24') || ip(request.source_ip).in_cidr('10.0.0.0/8'))`
-  - Complex rules (demo future capabilities)
-- [ ] Test three policy modes
-  - Create policy with `mode: "disabled"` → verify no evaluation
-  - Update to `mode: "dry_run"` → verify evaluates but doesn't block
-  - Check logs show "[DRY_RUN] Would have BLOCKED"
-  - Verify metrics track by mode
-  - Update to `mode: "enforced"` → verify blocks
-- [ ] Integration with authenticator-intake
-  - Load policies from FRAMES on startup
-  - Watch for incremental updates
-  - Wire up in request handler with AccessDecision
-- [ ] Performance testing (verify ~20μs across all modes)
-- [ ] Test mode transitions (disabled → dry_run → enforced)
-
-**Deliverable:** IP-based access control working end-to-end with CEL flexibility and three-state policy modes
-
-### Day 4: Production Rollout & Testing
-**Goal:** Enable in production with three-state policy modes
-
-- [ ] Deploy to production with initial policies in dry run mode
-  - Create production IP policies with `mode: "dry_run"`
-  - Run IP checks but don't enforce (per-policy)
-  - Log results and metrics
-  - Validate no false positives
-- [ ] Gradual rollout
-  - Deploy to 1% of pods → validate no errors
-  - Deploy to 10% of pods → validate performance
-  - Deploy to 100% of pods → full validation
-  - Monitor dry run metrics to see what would be blocked
-- [ ] Promote tested policies to enforcement
-  - Update `mode: "enforced"` for validated policies
-  - Monitor blocked request rates
-  - Rollback capability (disabled → dry_run → enforced transitions)
-- [ ] Test temporary disable functionality
-  - Disable problematic policy with `mode: "disabled"`
-  - Fix issue, re-enable via dry_run, then enforce
-- [ ] Create policy management UI (optional)
-- [ ] Monitoring and alerting setup
-  - Policy evaluation latency by mode
-  - Dry run "would block" rates by policy
-  - Actual blocked request rates by policy
-  - Mode distribution metrics
-  - Error rates
-
-**Deliverable:** Three-state policy modes running at scale, safe state transitions validated
-
-### Day 5: Load Testing & Demo
-**Goal:** Validate at scale and demo
-
-- [ ] Load testing at 7M req/s
-- [ ] Verify ~20μs P99 with CEL evaluation (10x under 200μs budget!)
-- [ ] Test policy updates (propagation speed ~5s)
+- [ ] Deploy to staging environment
+  - Roll out to staging pods with dry_run policies
+  - Monitor logs and metrics
+- [ ] End-to-end validation
+  - Create org-wide and key-specific policies
+  - Verify FRAMES propagation (~5s)
+  - Test policy updates and incremental changes
+  - Validate performance under realistic load
 - [ ] Edge case testing
-  - Invalid CEL expressions (handle gracefully)
+  - Invalid CEL expressions (fail open)
   - Missing policies (default allow)
-  - Complex expressions
-- [ ] Demo preparation
-  - Create IP block policy via Zoltron API (generates CEL)
-  - Show policy appears in FRAMES
-  - Show AuthN sidecar blocking IP
-  - Demo flexibility: easily add country/user-agent rules
-  - Live dashboard with metrics
-- [ ] Documentation and runbook
+  - Policy conflicts (key-specific + org-wide)
+- [ ] Dry run analysis
+  - Review "would block" metrics
+  - Identify false positives
+  - Tune policies as needed
 
-**Deliverable:** Production-ready IP blocking system with CEL flexibility and demo
+**Deliverable:** Validated in staging, ready for production rollout
+
+### Day 4: Production Rollout & Demo
+**Goal:** Deploy to production and prepare demo
+
+- [ ] Gradual production rollout
+  - Deploy to 1% → 10% → 100% of pods
+  - Start with dry_run mode policies
+  - Monitor metrics at each stage
+- [ ] Promote to enforcement
+  - Update validated policies to `mode: "enforced"`
+  - Monitor blocked request rates
+  - Verify no false positives
+- [ ] Demo preparation
+  - Create demo policy via UI
+  - Show FRAMES propagation
+  - Show request blocked in real-time
+  - Demo mode transitions (disabled → dry_run → enforced)
+  - Show metrics dashboard
+  - Demo future flexibility (add country/time rules)
+- [ ] Documentation
+  - Runbook for policy management
+  - Troubleshooting guide
+  - Metrics and alerting setup
+
+**Deliverable:** Production IP blocking system + demo ready
 
 ## Simplified API Implementation
 
