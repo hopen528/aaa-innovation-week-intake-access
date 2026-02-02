@@ -422,10 +422,10 @@ func BenchmarkCustom_WithCache(b *testing.B) {
 func BenchmarkCEL_SimpleIPCheck(b *testing.B) {
 	setupBenchmark(b)
 
-	// Add policy with ip().in_cidr() syntax
+	// Add policy with Kubernetes IP/CIDR library syntax
 	err := celEvaluator.AddPolicy(
 		"key-abc-123",
-		`ip(request.source_ip).in_cidr('10.0.1.100/32')`,
+		`cidr('10.0.1.100/32').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
 	if err != nil {
@@ -452,7 +452,7 @@ func BenchmarkCEL_IPCIDRCheck(b *testing.B) {
 
 	err := celEvaluator.AddPolicy(
 		"key-abc-123",
-		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
 	if err != nil {
@@ -533,7 +533,7 @@ func BenchmarkCEL_ComplexCondition(b *testing.B) {
 
 	err := celEvaluator.AddPolicy(
 		"key-abc-123",
-		`request.product == 'logs' && ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		`request.product == 'logs' && cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
 	if err != nil {
@@ -560,7 +560,7 @@ func BenchmarkCEL_VeryComplexCondition(b *testing.B) {
 
 	err := celEvaluator.AddPolicy(
 		"key-abc-123",
-		`request.product in ['logs', 'metrics'] && (ip(request.source_ip).in_cidr('10.0.0.0/16') || ip(request.source_ip).in_cidr('192.168.0.0/16'))`,
+		`request.product in ['logs', 'metrics'] && (cidr('10.0.0.0/16').containsIP(ip(request.source_ip)) || cidr('192.168.0.0/16').containsIP(ip(request.source_ip)))`,
 		PolicyModeEnforced,
 	)
 	if err != nil {
@@ -587,7 +587,7 @@ func BenchmarkCEL_DryRunMode(b *testing.B) {
 
 	err := celEvaluator.AddPolicy(
 		"key-abc-123",
-		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeDryRun,
 	)
 	if err != nil {
@@ -625,7 +625,7 @@ func BenchmarkE2E_AllThreeApproaches(b *testing.B) {
 	// Setup CEL policy
 	celEvaluator.AddPolicy(
 		"key-abc-123",
-		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
 	celCtx := IntakeRequestToContext(testRequest)
@@ -718,7 +718,7 @@ func TestLatencyPercentiles(t *testing.T) {
 	// Setup CEL policy
 	celEvaluator.AddPolicy(
 		"key-abc-123",
-		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
 	celCtx := IntakeRequestToContext(testRequest)
