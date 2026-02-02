@@ -38,6 +38,7 @@ var (
 		Hour:       14, // 2 PM
 		AllowedIPs: []string{"10.0.0.0/16", "192.168.0.0/16"},
 	}
+	testOrgID int32 = 12345 // Numeric org ID for CEL evaluator
 )
 
 // Setup function - call this before benchmarks
@@ -422,9 +423,10 @@ func BenchmarkCustom_WithCache(b *testing.B) {
 func BenchmarkCEL_SimpleIPCheck(b *testing.B) {
 	setupBenchmark(b)
 
-	// Add policy with Kubernetes IP/CIDR library syntax
+	// Add policy with Kubernetes IP/CIDR library syntax (orgID:apiKeyUUID format)
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`cidr('10.0.1.100/32').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
@@ -437,7 +439,7 @@ func BenchmarkCEL_SimpleIPCheck(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -451,7 +453,8 @@ func BenchmarkCEL_IPCIDRCheck(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
@@ -464,7 +467,7 @@ func BenchmarkCEL_IPCIDRCheck(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -478,7 +481,8 @@ func BenchmarkCEL_ProductScoping(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`request.product == 'logs'`,
 		PolicyModeEnforced,
 	)
@@ -491,7 +495,7 @@ func BenchmarkCEL_ProductScoping(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -505,7 +509,8 @@ func BenchmarkCEL_MultiProductScoping(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`request.product in ['logs', 'metrics']`,
 		PolicyModeEnforced,
 	)
@@ -518,7 +523,7 @@ func BenchmarkCEL_MultiProductScoping(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -532,7 +537,8 @@ func BenchmarkCEL_ComplexCondition(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`request.product == 'logs' && cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
@@ -545,7 +551,7 @@ func BenchmarkCEL_ComplexCondition(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -559,7 +565,8 @@ func BenchmarkCEL_VeryComplexCondition(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`request.product in ['logs', 'metrics'] && (cidr('10.0.0.0/16').containsIP(ip(request.source_ip)) || cidr('192.168.0.0/16').containsIP(ip(request.source_ip)))`,
 		PolicyModeEnforced,
 	)
@@ -572,7 +579,7 @@ func BenchmarkCEL_VeryComplexCondition(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -586,7 +593,8 @@ func BenchmarkCEL_DryRunMode(b *testing.B) {
 	setupBenchmark(b)
 
 	err := celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeDryRun,
 	)
@@ -599,7 +607,7 @@ func BenchmarkCEL_DryRunMode(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, ctx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
@@ -624,7 +632,8 @@ func BenchmarkE2E_AllThreeApproaches(b *testing.B) {
 
 	// Setup CEL policy
 	celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
@@ -717,7 +726,8 @@ func TestLatencyPercentiles(t *testing.T) {
 
 	// Setup CEL policy
 	celEvaluator.AddPolicy(
-		"key-abc-123",
+		testOrgID,
+		testRequest.KeyUUID,
 		`cidr('10.0.0.0/16').containsIP(ip(request.source_ip))`,
 		PolicyModeEnforced,
 	)
@@ -763,7 +773,7 @@ func TestLatencyPercentiles(t *testing.T) {
 	fmt.Println("Measuring CEL evaluator latencies...")
 	for i := 0; i < iterations; i++ {
 		start := time.Now()
-		_, _ = celEvaluator.CheckAccess("key-abc-123", celCtx)
+		_, _ = celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, celCtx)
 		celLatencies[i] = time.Since(start)
 	}
 

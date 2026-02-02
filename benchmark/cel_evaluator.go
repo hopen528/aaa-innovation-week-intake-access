@@ -27,11 +27,13 @@ type PolicyProgram struct {
 }
 
 // CELEvaluator evaluates access policies using CEL expressions
-// This matches the innovation week design with ip().in_cidr() syntax
+// This matches the innovation week design with K8s CEL library (cidr().containsIP(ip()) syntax)
 type CELEvaluator struct {
 	mu       sync.RWMutex
 	env      *cel.Env
-	policies map[string]*PolicyProgram // Map of subject ID → compiled program
+	policies map[string]*PolicyProgram // Map of "<orgID>:<apiKeyUUID>" → compiled program
+	                                   // "123:*" = org-wide for org 123
+	                                   // "123:uuid-456" = key-specific for org 123, key uuid-456
 }
 
 // RequestContext represents the request attributes for evaluation
@@ -78,7 +80,8 @@ func NewCELEvaluator() (*CELEvaluator, error) {
 }
 
 // AddPolicy compiles and adds a policy for evaluation
-func (e *CELEvaluator) AddPolicy(subjectID, expression string, mode PolicyMode) error {
+// Policy key format: "<orgID>:<apiKeyUUID>"
+func (e *CELEvaluator) AddPolicy(orgID int32, subjectID, expression string, mode PolicyMode) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -94,8 +97,10 @@ func (e *CELEvaluator) AddPolicy(subjectID, expression string, mode PolicyMode) 
 		return fmt.Errorf("failed to create program: %w", err)
 	}
 
-	policyID := fmt.Sprintf("policy-%s", subjectID)
-	e.policies[subjectID] = &PolicyProgram{
+	// Store with orgID:subjectID key format
+	policyKey := fmt.Sprintf("%d:%s", orgID, subjectID)
+	policyID := fmt.Sprintf("policy-%d-%s", orgID, subjectID)
+	e.policies[policyKey] = &PolicyProgram{
 		Program:  prg,
 		Mode:     mode,
 		PolicyID: policyID,
@@ -105,28 +110,33 @@ func (e *CELEvaluator) AddPolicy(subjectID, expression string, mode PolicyMode) 
 }
 
 // CheckAccess evaluates CEL expression for API key
-func (e *CELEvaluator) CheckAccess(apiKeyID string, ctx *RequestContext) (*AccessDecision, error) {
+// Policy keys format: "<orgID>:<apiKeyUUID>"
+func (e *CELEvaluator) CheckAccess(orgID int32, apiKeyUUID string, ctx *RequestContext) (*AccessDecision, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	startTime := time.Now()
 
-	// Check org-wide policy first (api_key:*)
-	if orgPolicy, exists := e.policies["*"]; exists {
-		decision, err := e.evaluatePolicy(orgPolicy, "*", ctx)
+	// Construct policy keys
+	orgWideKey := fmt.Sprintf("%d:*", orgID)
+	keySpecificKey := fmt.Sprintf("%d:%s", orgID, apiKeyUUID)
+
+	// Check org-wide policy first (orgID:*)
+	if orgPolicy, exists := e.policies[orgWideKey]; exists {
+		decision, err := e.evaluatePolicy(orgPolicy, orgWideKey, ctx)
 		if err != nil {
 			return nil, err
 		}
 		if !decision.Allowed && decision.Mode == PolicyModeEnforced {
 			decision.Reason = fmt.Sprintf("[ORG-WIDE] %s", decision.Reason)
-			decision.PolicyScope = "*"
+			decision.PolicyScope = orgWideKey
 			decision.EvaluationTime = time.Since(startTime)
 			return decision, nil
 		}
 	}
 
-	// Check API-key-specific policy
-	keyPolicy, exists := e.policies[apiKeyID]
+	// Check API-key-specific policy (orgID:apiKeyUUID)
+	keyPolicy, exists := e.policies[keySpecificKey]
 	if !exists {
 		return &AccessDecision{
 			Allowed:        true,
@@ -134,13 +144,13 @@ func (e *CELEvaluator) CheckAccess(apiKeyID string, ctx *RequestContext) (*Acces
 		}, nil
 	}
 
-	decision, err := e.evaluatePolicy(keyPolicy, apiKeyID, ctx)
+	decision, err := e.evaluatePolicy(keyPolicy, keySpecificKey, ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	decision.Reason = fmt.Sprintf("[API_KEY] %s", decision.Reason)
-	decision.PolicyScope = apiKeyID
+	decision.PolicyScope = keySpecificKey
 	decision.EvaluationTime = time.Since(startTime)
 	return decision, nil
 }

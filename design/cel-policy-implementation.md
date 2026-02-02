@@ -666,8 +666,9 @@ type PolicyProgram struct {
 type CELEvaluator struct {
     mu       sync.RWMutex
     env      *cel.Env
-    policies map[string]*PolicyProgram  // Map of subject ID → compiled program
-                                         // "*" = org-wide, "key-123" = key-specific
+    policies map[string]*PolicyProgram  // Map of "<orgID>:<apiKeyUUID>" → compiled program
+                                         // "123:*" = org-wide for org 123
+                                         // "123:uuid-456" = key-specific for org 123, key uuid-456
     metrics  *Metrics
 }
 
@@ -706,11 +707,10 @@ func NewCELEvaluator() (*CELEvaluator, error) {
 // Note: FRAMES contexts are keyed by (orgID, resourceType, resourceID)
 // The authenticator-intake knows the orgID from EdgeAuthResult and loads
 // the appropriate policies for that org from FRAMES at startup.
-func (e *CELEvaluator) LoadPolicies(tuples []*RelationTuple) error {
+// Each org's policies are loaded separately and stored with orgID prefix.
+func (e *CELEvaluator) LoadPolicies(orgID int32, tuples []*RelationTuple) error {
     e.mu.Lock()
     defer e.mu.Unlock()
-
-    policies := make(map[string]*PolicyProgram)
 
     for _, tuple := range tuples {
         if tuple.SubjectType != "api_key" {
@@ -722,7 +722,7 @@ func (e *CELEvaluator) LoadPolicies(tuples []*RelationTuple) error {
 
         // SubjectID can be:
         // - "*" for org-wide policies (applies to all keys in org)
-        // - "key-123" for key-specific policies
+        // - "uuid-123" for key-specific policies (API key UUID)
         subjectID := tuple.SubjectID
         expression := tuple.Condition
 
@@ -744,15 +744,16 @@ func (e *CELEvaluator) LoadPolicies(tuples []*RelationTuple) error {
             return fmt.Errorf("failed to create program for api_key:%s: %w", subjectID, err)
         }
 
-        // Cache compiled program for fast evaluation
-        policies[subjectID] = &PolicyProgram{
+        // Store with orgID:subjectID key format
+        // Examples: "123:*" (org-wide), "123:uuid-456" (key-specific)
+        policyKey := fmt.Sprintf("%d:%s", orgID, subjectID)
+        e.policies[policyKey] = &PolicyProgram{
             Program:  prg,
             Mode:     mode,
             PolicyID: tuple.ObjectID,
         }
     }
 
-    e.policies = policies
     return nil
 }
 
@@ -783,34 +784,41 @@ type AccessDecision struct {
 }
 
 // CheckAccess evaluates CEL expression for API key
-// Checks both org-wide (*) and key-specific policies
-func (e *CELEvaluator) CheckAccess(apiKeyID string, ctx *RequestContext) (*AccessDecision, error) {
+// Checks both org-wide and key-specific policies
+// Policy keys format: "<orgID>:<apiKeyUUID>"
+//   - "123:*" = org-wide for org 123
+//   - "123:uuid-456" = key-specific for org 123, key uuid-456
+func (e *CELEvaluator) CheckAccess(orgID int32, apiKeyUUID string, ctx *RequestContext) (*AccessDecision, error) {
     e.mu.RLock()
     defer e.mu.RUnlock()
 
     startTime := time.Now()
 
-    // Check org-wide policy first (api_key:*)
-    if orgPolicy, exists := e.policies["*"]; exists {
-        decision, err := e.evaluatePolicy(orgPolicy, "*", ctx)
+    // Construct policy keys
+    orgWideKey := fmt.Sprintf("%d:*", orgID)
+    keySpecificKey := fmt.Sprintf("%d:%s", orgID, apiKeyUUID)
+
+    // Check org-wide policy first (orgID:*)
+    if orgPolicy, exists := e.policies[orgWideKey]; exists {
+        decision, err := e.evaluatePolicy(orgPolicy, orgWideKey, ctx)
         if err != nil {
             return nil, err
         }
         if !decision.Allowed && decision.Mode == PolicyModeEnforced {
             // Org-wide policy blocked in enforcement mode
             decision.Reason = fmt.Sprintf("[ORG-WIDE] %s", decision.Reason)
-            decision.PolicyScope = "*"
+            decision.PolicyScope = orgWideKey
             decision.EvaluationTime = time.Since(startTime)
             return decision, nil
         }
         // Track dry_run blocks even if allowed
         if decision.WouldBlock && decision.Mode == PolicyModeDryRun {
-            e.metrics.RecordEvaluation("*", orgPolicy.PolicyID, orgPolicy.Mode, true, false)
+            e.metrics.RecordEvaluation(orgWideKey, orgPolicy.PolicyID, orgPolicy.Mode, true, false)
         }
     }
 
-    // Check API-key-specific policy
-    keyPolicy, exists := e.policies[apiKeyID]
+    // Check API-key-specific policy (orgID:apiKeyUUID)
+    keyPolicy, exists := e.policies[keySpecificKey]
     if !exists {
         // No key-specific policy, and org-wide passed (or doesn't exist) = allow
         return &AccessDecision{
@@ -819,13 +827,13 @@ func (e *CELEvaluator) CheckAccess(apiKeyID string, ctx *RequestContext) (*Acces
         }, nil
     }
 
-    decision, err := e.evaluatePolicy(keyPolicy, apiKeyID, ctx)
+    decision, err := e.evaluatePolicy(keyPolicy, keySpecificKey, ctx)
     if err != nil {
         return nil, err
     }
 
     decision.Reason = fmt.Sprintf("[API_KEY] %s", decision.Reason)
-    decision.PolicyScope = apiKeyID
+    decision.PolicyScope = keySpecificKey
     decision.EvaluationTime = time.Since(startTime)
     return decision, nil
 }
@@ -902,7 +910,7 @@ func (e *CELEvaluator) evaluatePolicy(policy *PolicyProgram, subjectID string, c
 // AddPolicy adds or updates a single policy (for incremental FRAMES updates)
 // Only compiles the changed policy (~35μs), not the entire set.
 // This keeps the compilation cost minimal during updates.
-func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
+func (e *CELEvaluator) AddPolicy(orgID int32, tuple *RelationTuple) error {
     e.mu.Lock()
     defer e.mu.Unlock()
 
@@ -910,7 +918,7 @@ func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
         return nil
     }
 
-    subjectID := tuple.SubjectID  // Can be "*" or specific key ID
+    subjectID := tuple.SubjectID  // Can be "*" or specific API key UUID
     expression := tuple.Condition
 
     // Parse mode from object_id
@@ -927,8 +935,9 @@ func (e *CELEvaluator) AddPolicy(tuple *RelationTuple) error {
         return err
     }
 
-    // Update cache with newly compiled program
-    e.policies[subjectID] = &PolicyProgram{
+    // Update cache with newly compiled program using orgID:subjectID key
+    policyKey := fmt.Sprintf("%d:%s", orgID, subjectID)
+    e.policies[policyKey] = &PolicyProgram{
         Program:  prg,
         Mode:     mode,
         PolicyID: tuple.ObjectID,
@@ -947,9 +956,9 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
         return &UnauthorizedError{StatusCode: 401}
     }
 
-    // Extract org ID from auth result (already available!)
-    orgID := authResult.OrgID  // ✅ From EdgeAuthResult
-    apiKeyID := req.APIKey.ID
+    // Extract org ID and API key UUID from auth result (already available!)
+    orgID := authResult.OrgID       // ✅ From EdgeAuthResult
+    apiKeyUUID := authResult.UUID   // ✅ API key UUID from EdgeAuthResult
 
     // Step 2: Extract request context
     ctx := &RequestContext{
@@ -959,16 +968,17 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
     }
 
     // Step 3: Evaluate CEL policy (checks both org-wide and key-specific)
-    // Note: The evaluator internally uses orgID to look up policies from FRAMES:
-    //   - (orgID, "api_key", "*")      → org-wide policy
-    //   - (orgID, "api_key", apiKeyID) → key-specific policy
-    decision, err := s.celEvaluator.CheckAccess(apiKeyID, ctx)
+    // Policy keys are in format: "<orgID>:<apiKeyUUID>"
+    // - orgID:*           → org-wide policy (applies to all keys in org)
+    // - orgID:apiKeyUUID  → key-specific policy (applies only to this key)
+    decision, err := s.celEvaluator.CheckAccess(orgID, apiKeyUUID, ctx)
 
     if err != nil {
         // Log error, fail open for availability
         s.metrics.IncrementPolicyEvalErrors()
         log.Warn("CEL policy evaluation error",
-            log.String("api_key", apiKeyID),
+            log.Int32("org_id", orgID),
+            log.String("api_key_uuid", apiKeyUUID),
             log.String("ip", ctx.SourceIP),
             log.ErrorField(err))
         return nil // Fail open
@@ -977,7 +987,8 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
     // Log evaluation results based on mode
     if decision.Mode == PolicyModeDryRun {
         log.Info("Policy evaluation",
-            log.String("api_key", apiKeyID),
+            log.Int32("org_id", orgID),
+            log.String("api_key_uuid", apiKeyUUID),
             log.String("policy_id", decision.PolicyID),
             log.String("mode", string(decision.Mode)),
             log.String("ip", ctx.SourceIP),
@@ -989,9 +1000,10 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
     }
 
     if !decision.Allowed {
-        s.metrics.IncrementBlockedRequests(apiKeyID, ctx.SourceIP)
+        s.metrics.IncrementBlockedRequests(orgID, apiKeyUUID, ctx.SourceIP)
         log.Info("Request blocked by policy",
-            log.String("api_key", apiKeyID),
+            log.Int32("org_id", orgID),
+            log.String("api_key_uuid", apiKeyUUID),
             log.String("policy_id", decision.PolicyID),
             log.String("ip", ctx.SourceIP),
             log.String("reason", decision.Reason),
