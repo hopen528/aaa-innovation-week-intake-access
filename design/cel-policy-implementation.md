@@ -744,8 +744,8 @@ dd-go/
 
 **Deliverable:** Validated in staging, ready for production rollout
 
-### Day 4: Production Rollout & Demo
-**Goal:** Deploy to production and prepare demo
+### Post-Innovation Week: Production Rollout
+**Goal:** Deploy to production (out of scope for Innovation Week)
 
 - [ ] Gradual production rollout
   - Deploy to 1% → 10% → 100% of pods
@@ -755,19 +755,12 @@ dd-go/
   - Update validated policies to `mode: "enforced"`
   - Monitor blocked request rates
   - Verify no false positives
-- [ ] Demo preparation
-  - Create demo policy via UI
-  - Show FRAMES propagation
-  - Show request blocked in real-time
-  - Demo mode transitions (disabled → dry_run → enforced)
-  - Show metrics dashboard
-  - Demo future flexibility (add country/time rules)
 - [ ] Documentation
   - Runbook for policy management
   - Troubleshooting guide
   - Metrics and alerting setup
 
-**Deliverable:** Production IP blocking system + demo ready
+**Deliverable:** Production IP blocking system
 
 ## Simplified API Implementation
 
@@ -1531,8 +1524,17 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
 
 ## Implementation Status
 
-**Current Phase:** Day 1 Complete ✅
-**Next:** Day 2 - CEL Evaluator + Integration
+**Innovation Week Scope:**
+- ✅ Day 1: API + UI (DONE)
+  - API + UI implementation in rbac-public and web-ui
+  - Policies can be created via UI and stored in Zoltron
+  - FRAMES streaming infrastructure in place
+- ⏳ Day 2: CEL Evaluator + Integration (TODO)
+- ⏳ Day 3: Staging Deployment + Demo (TODO)
+
+**Post-Innovation Week:**
+- Production rollout and enforcement (out of scope)
+
 **Started:** Innovation Week 2026
 
 ## Future Extension Benefits (CEL Advantage)
