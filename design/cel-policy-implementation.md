@@ -318,11 +318,12 @@ RestrictionPolicyKey {
 Instead of generic restriction policy format, create a simple IP policy endpoint that generates CEL expressions:
 
 ```go
-// New endpoint in Zoltron
-POST /v1/api-keys/{key_id}/ip-policies
+// New consolidated endpoint in rbac-public
+POST /api/v1/orgs/{org_uuid}/ip-policies
 
 // Request body (simple!)
 {
+  "resource_id": "key-123",  // "*" for org-wide, "key-123" for key-specific
   "blocked_cidrs": ["192.168.1.0/24", "10.0.0.0/8"],
   "allowed_cidrs": ["8.8.8.0/24"],
   "mode": "enforced"  // Optional: "disabled" | "dry_run" | "enforced" (default: "enforced")
@@ -377,28 +378,28 @@ func (s *PolicyService) CreateIPPolicy(apiKeyID string, req *IPPolicyRequest) er
 
 ## How to Create IP Policies
 
-### Two Endpoints for Different Scopes
+### Consolidated API (3 Endpoints)
 
-**Org-wide policy** (applies to all API keys):
+**All policies managed through single endpoint:**
 ```
-POST /v1/orgs/{org_uuid}/ip-policies
+POST   /api/v1/orgs/{org_uuid}/ip-policies      # Create policy
+GET    /api/v1/orgs/{org_uuid}/ip-policies      # List policies
+PATCH  /api/v1/orgs/{org_uuid}/ip-policies/{id} # Update mode
 ```
-Creates `api_key:*` policy - affects all API keys in the org
 
-**Key-specific policy** (applies to one API key):
-```
-POST /v1/api-keys/{key_id}/ip-policies
-```
-Creates `api_key:{key_id}` policy - affects only that specific key
+**Scope determined by `resource_id` in request body:**
+- `"*"` - Creates org-wide policy (affects all API keys)
+- `"key-123"` - Creates key-specific policy (affects only that key)
 
 **When to use which:**
-- Use **org-wide** for: blocking malicious IPs/ranges for entire org, enforcing corporate network requirements
-- Use **key-specific** for: special exceptions, different requirements per service/team
+- Use **`resource_id: "*"`** for: blocking malicious IPs/ranges for entire org, enforcing corporate network requirements
+- Use **`resource_id: "key-123"`** for: special exceptions, different requirements per service/team
 
 ### Request Format (Simple JSON)
 
 ```json
 {
+  "resource_id": "*",    // "*" for org-wide, "key-123" for key-specific
   "blocked_cidrs": [
     "192.168.1.0/24",
     "10.0.0.0/8"
@@ -406,11 +407,12 @@ Creates `api_key:{key_id}` policy - affects only that specific key
   "allowed_cidrs": [
     "8.8.8.0/24"
   ],
-  "dry_run": false
+  "mode": "enforced"
 }
 ```
 
 **Fields:**
+- `resource_id`: Scope of policy - `"*"` (org-wide) or specific key ID
 - `blocked_cidrs`: List of CIDR blocks to block
 - `allowed_cidrs`: List of CIDR blocks to allow (optional)
 - `mode`: Policy enforcement mode (optional, default: `"enforced"`)
@@ -443,11 +445,12 @@ Creates `api_key:{key_id}` policy - affects only that specific key
 Block a malicious IP range for the entire organization:
 
 ```bash
-curl -X POST http://localhost:8080/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -H "DD-API-KEY: {org_api_key}" \
   -H "DD-APPLICATION-KEY: {app_key}" \
   -d '{
+    "resource_id": "*",
     "blocked_cidrs": ["1.2.3.0/24"],
     "mode": "enforced"
   }'
@@ -465,9 +468,10 @@ curl -X POST http://localhost:8080/v1/orgs/org-123/ip-policies \
 Block IPs for one specific API key:
 
 ```bash
-curl -X POST http://localhost:8080/v1/api-keys/key-456/ip-policies \
+curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
+    "resource_id": "key-456",
     "blocked_cidrs": ["10.0.0.0/8"],
     "mode": "enforced"
   }'
@@ -485,9 +489,10 @@ curl -X POST http://localhost:8080/v1/api-keys/key-456/ip-policies \
 Only allow requests from corporate network (all API keys):
 
 ```bash
-curl -X POST http://localhost:8080/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
+    "resource_id": "*",
     "allowed_cidrs": [
       "10.0.0.0/8",
       "172.16.0.0/12"
@@ -509,9 +514,10 @@ ip(request.source_ip).in_cidr('172.16.0.0/12')
 Allow corporate network but block specific problem subnet:
 
 ```bash
-curl -X POST http://localhost:8080/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
+    "resource_id": "*",
     "allowed_cidrs": ["10.0.0.0/8"],
     "blocked_cidrs": ["10.0.1.0/24"],
     "mode": "enforced"
@@ -532,8 +538,9 @@ ip(request.source_ip).in_cidr('10.0.0.0/8') &&
 
 **Step 1: Org-wide policy**
 ```bash
-POST /v1/orgs/org-123/ip-policies
+POST /api/v1/orgs/org-123/ip-policies
 {
+  "resource_id": "*",
   "blocked_cidrs": ["192.168.0.0/16"],
   "mode": "enforced"
 }
@@ -542,8 +549,9 @@ POST /v1/orgs/org-123/ip-policies
 
 **Step 2: Key-specific additional block**
 ```bash
-POST /v1/api-keys/key-789/ip-policies
+POST /api/v1/orgs/org-123/ip-policies
 {
+  "resource_id": "key-789",
   "blocked_cidrs": ["172.16.0.0/12"],
   "mode": "enforced"
 }
@@ -585,9 +593,10 @@ No proto changes needed! The CEL evaluator parses the suffix to determine mode.
 ### Example: Create Policy in Dry Run Mode
 
 ```bash
-curl -X POST http://localhost:8080/v1/api-keys/my-api-key-123/ip-policies \
+curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
+    "resource_id": "my-api-key-123",
     "blocked_cidrs": ["192.168.1.0/24"],
     "mode": "dry_run"
   }'
@@ -604,16 +613,16 @@ curl -X POST http://localhost:8080/v1/api-keys/my-api-key-123/ip-policies \
 **Policy Lifecycle (disabled → dry_run → enforced):**
 ```bash
 # Step 1: Create disabled policy
-POST /v1/api-keys/key-123/ip-policies {"blocked_cidrs": ["192.168.1.0/24"], "mode": "disabled"}
+POST /api/v1/orgs/org-123/ip-policies {"resource_id": "key-123", "blocked_cidrs": ["192.168.1.0/24"], "mode": "disabled"}
 
 # Step 2: Test in dry run
-PATCH /v1/api-keys/key-123/ip-policies/expr-abc123 {"mode": "dry_run"}
+PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "dry_run"}
 
 # Step 3: Promote to enforcement
-PATCH /v1/api-keys/key-123/ip-policies/expr-abc123 {"mode": "enforced"}
+PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "enforced"}
 
 # Step 4: Temporarily disable
-PATCH /v1/api-keys/key-123/ip-policies/expr-abc123 {"mode": "disabled"}
+PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "disabled"}
 ```
 
 ### Metrics by Mode
