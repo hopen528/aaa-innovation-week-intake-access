@@ -683,7 +683,7 @@ func BenchmarkE2E_AllThreeApproaches(b *testing.B) {
 	b.Run("CEL", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			decision, err := celEvaluator.CheckAccess("key-abc-123", celCtx)
+			decision, err := celEvaluator.CheckAccess(testOrgID, testRequest.KeyUUID, celCtx)
 			if err != nil {
 				b.Fatalf("CheckAccess failed: %v", err)
 			}
