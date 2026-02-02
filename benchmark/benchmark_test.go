@@ -27,9 +27,10 @@ type IntakeRequest struct {
 
 // Global clients for benchmarks
 var (
-	spicedbClient  *authzed.Client
+	spicedbClient   *authzed.Client
 	customEvaluator *CustomEvaluator
-	testRequest    = &IntakeRequest{
+	celEvaluator    *CELEvaluator
+	testRequest     = &IntakeRequest{
 		OrgID:      "org-12345",
 		IP:         "10.0.1.100",
 		KeyUUID:    "key-abc-123",
@@ -41,32 +42,48 @@ var (
 
 // Setup function - call this before benchmarks
 func setupBenchmark(b *testing.B) {
+	setupBenchmarkWithSpiceDB(b, false)
+}
+
+func setupBenchmarkWithSpiceDB(b *testing.B, needSpiceDB bool) {
 	var err error
 
-	// Setup SpiceDB client
-	spicedbClient, err = authzed.NewClient(
-		"localhost:50051",
-		grpcutil.WithInsecureBearerToken("benchmark-key"),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		b.Fatalf("Failed to create SpiceDB client: %v", err)
-	}
+	// Setup SpiceDB client (only if needed)
+	if needSpiceDB {
+		spicedbClient, err = authzed.NewClient(
+			"localhost:50051",
+			grpcutil.WithInsecureBearerToken("benchmark-key"),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			b.Fatalf("Failed to create SpiceDB client: %v", err)
+		}
 
-	// Write SpiceDB schema
-	if err := setupSpiceDBSchema(spicedbClient); err != nil {
-		b.Fatalf("Failed to setup SpiceDB schema: %v", err)
-	}
+		// Write SpiceDB schema
+		if err := setupSpiceDBSchema(spicedbClient); err != nil {
+			b.Fatalf("Failed to setup SpiceDB schema: %v", err)
+		}
 
-	// Write test relationships
-	if err := setupSpiceDBRelationships(spicedbClient); err != nil {
-		b.Fatalf("Failed to setup SpiceDB relationships: %v", err)
+		// Write test relationships
+		if err := setupSpiceDBRelationships(spicedbClient); err != nil {
+			b.Fatalf("Failed to setup SpiceDB relationships: %v", err)
+		}
 	}
 
 	// Setup custom evaluator
-	customEvaluator, err = NewCustomEvaluator()
-	if err != nil {
-		b.Fatalf("Failed to create custom evaluator: %v", err)
+	if customEvaluator == nil {
+		customEvaluator, err = NewCustomEvaluator()
+		if err != nil {
+			b.Fatalf("Failed to create custom evaluator: %v", err)
+		}
+	}
+
+	// Setup CEL evaluator (innovation week approach)
+	if celEvaluator == nil {
+		celEvaluator, err = NewCELEvaluator()
+		if err != nil {
+			b.Fatalf("Failed to create CEL evaluator: %v", err)
+		}
 	}
 }
 
@@ -148,7 +165,7 @@ func setupSpiceDBRelationships(client *authzed.Client) error {
 
 // Benchmark: SpiceDB with simple IP check
 func BenchmarkSpiceDB_SimpleIPCheck(b *testing.B) {
-	setupBenchmark(b)
+	setupBenchmarkWithSpiceDB(b, true)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -185,7 +202,7 @@ func BenchmarkSpiceDB_SimpleIPCheck(b *testing.B) {
 
 // Benchmark: SpiceDB with API key check
 func BenchmarkSpiceDB_APIKeyCheck(b *testing.B) {
-	setupBenchmark(b)
+	setupBenchmarkWithSpiceDB(b, true)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -225,7 +242,7 @@ func BenchmarkSpiceDB_APIKeyCheck(b *testing.B) {
 
 // Benchmark: SpiceDB with complex condition
 func BenchmarkSpiceDB_ComplexCondition(b *testing.B) {
-	setupBenchmark(b)
+	setupBenchmarkWithSpiceDB(b, true)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -401,12 +418,202 @@ func BenchmarkCustom_WithCache(b *testing.B) {
 	})
 }
 
-// Benchmark: End-to-end latency comparison
-func BenchmarkE2E_SpiceDBvsCustom(b *testing.B) {
+// Benchmark: CEL evaluator with simple IP check
+func BenchmarkCEL_SimpleIPCheck(b *testing.B) {
+	setupBenchmark(b)
+
+	// Add policy with ip().in_cidr() syntax
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`ip(request.source_ip).in_cidr('10.0.1.100/32')`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with CIDR check
+func BenchmarkCEL_IPCIDRCheck(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with product scoping
+func BenchmarkCEL_ProductScoping(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`request.product == 'logs'`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with multiple products
+func BenchmarkCEL_MultiProductScoping(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`request.product in ['logs', 'metrics']`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with complex condition (IP + product)
+func BenchmarkCEL_ComplexCondition(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`request.product == 'logs' && ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with very complex condition
+func BenchmarkCEL_VeryComplexCondition(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`request.product in ['logs', 'metrics'] && (ip(request.source_ip).in_cidr('10.0.0.0/16') || ip(request.source_ip).in_cidr('192.168.0.0/16'))`,
+		PolicyModeEnforced,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: CEL evaluator with dry run mode
+func BenchmarkCEL_DryRunMode(b *testing.B) {
+	setupBenchmark(b)
+
+	err := celEvaluator.AddPolicy(
+		"key-abc-123",
+		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		PolicyModeDryRun,
+	)
+	if err != nil {
+		b.Fatalf("Failed to add policy: %v", err)
+	}
+
+	ctx := IntakeRequestToContext(testRequest)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", ctx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
+		}
+	})
+}
+
+// Benchmark: End-to-end latency comparison (All 3 approaches)
+func BenchmarkE2E_AllThreeApproaches(b *testing.B) {
 	setupBenchmark(b)
 	ctx := context.Background()
 
-	policy := &Policy{
+	customPolicy := &Policy{
 		Bindings: []Binding{
 			{
 				ResourceType: "logs",
@@ -414,6 +621,14 @@ func BenchmarkE2E_SpiceDBvsCustom(b *testing.B) {
 			},
 		},
 	}
+
+	// Setup CEL policy
+	celEvaluator.AddPolicy(
+		"key-abc-123",
+		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		PolicyModeEnforced,
+	)
+	celCtx := IntakeRequestToContext(testRequest)
 
 	b.Run("SpiceDB", func(b *testing.B) {
 		b.ResetTimer()
@@ -448,11 +663,22 @@ func BenchmarkE2E_SpiceDBvsCustom(b *testing.B) {
 	b.Run("Custom", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			allowed, err := customEvaluator.Evaluate(policy, testRequest)
+			allowed, err := customEvaluator.Evaluate(customPolicy, testRequest)
 			if err != nil {
 				b.Fatalf("Evaluate failed: %v", err)
 			}
 			_ = allowed
+		}
+	})
+
+	b.Run("CEL", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			decision, err := celEvaluator.CheckAccess("key-abc-123", celCtx)
+			if err != nil {
+				b.Fatalf("CheckAccess failed: %v", err)
+			}
+			_ = decision
 		}
 	})
 }
@@ -477,9 +703,10 @@ func TestLatencyPercentiles(t *testing.T) {
 	iterations := 10000
 	spicedbLatencies := make([]time.Duration, iterations)
 	customLatencies := make([]time.Duration, iterations)
+	celLatencies := make([]time.Duration, iterations)
 
 	ctx := context.Background()
-	policy := &Policy{
+	customPolicy := &Policy{
 		Bindings: []Binding{
 			{
 				ResourceType: "logs",
@@ -487,6 +714,14 @@ func TestLatencyPercentiles(t *testing.T) {
 			},
 		},
 	}
+
+	// Setup CEL policy
+	celEvaluator.AddPolicy(
+		"key-abc-123",
+		`ip(request.source_ip).in_cidr('10.0.0.0/16')`,
+		PolicyModeEnforced,
+	)
+	celCtx := IntakeRequestToContext(testRequest)
 
 	// Measure SpiceDB latencies
 	fmt.Println("Measuring SpiceDB latencies...")
@@ -520,13 +755,22 @@ func TestLatencyPercentiles(t *testing.T) {
 	fmt.Println("Measuring Custom evaluator latencies...")
 	for i := 0; i < iterations; i++ {
 		start := time.Now()
-		_, _ = customEvaluator.Evaluate(policy, testRequest)
+		_, _ = customEvaluator.Evaluate(customPolicy, testRequest)
 		customLatencies[i] = time.Since(start)
+	}
+
+	// Measure CEL latencies
+	fmt.Println("Measuring CEL evaluator latencies...")
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		_, _ = celEvaluator.CheckAccess("key-abc-123", celCtx)
+		celLatencies[i] = time.Since(start)
 	}
 
 	// Calculate percentiles
 	printPercentiles("SpiceDB", spicedbLatencies)
 	printPercentiles("Custom", customLatencies)
+	printPercentiles("CEL (Innovation Week)", celLatencies)
 }
 
 func printPercentiles(name string, latencies []time.Duration) {

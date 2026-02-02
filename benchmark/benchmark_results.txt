@@ -1,0 +1,18 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/DataDog/policy-benchmark
+cpu: Apple M1 Max
+BenchmarkCustom_SimpleIPCheck-10        	  153240	     16452 ns/op	   27697 B/op	     438 allocs/op
+BenchmarkCustom_APIKeyCheck-10          	   79024	     31257 ns/op	   38591 B/op	     610 allocs/op
+BenchmarkCustom_IPCIDRCheck-10          	  115227	     20962 ns/op	   30717 B/op	     468 allocs/op
+BenchmarkCustom_ComplexCondition-10     	   33228	     72537 ns/op	   79227 B/op	    1308 allocs/op
+BenchmarkCustom_WithCache-10            	 5915620	       415.5 ns/op	     902 B/op	      18 allocs/op
+BenchmarkCEL_SimpleIPCheck-10           	 5112310	       494.4 ns/op	    1078 B/op	      19 allocs/op
+BenchmarkCEL_IPCIDRCheck-10             	 5443422	       445.2 ns/op	    1078 B/op	      19 allocs/op
+BenchmarkCEL_ProductScoping-10          	 6813355	       400.6 ns/op	     856 B/op	      10 allocs/op
+BenchmarkCEL_MultiProductScoping-10     	 5363528	       439.8 ns/op	    1017 B/op	      15 allocs/op
+BenchmarkCEL_ComplexCondition-10        	 5026034	       471.7 ns/op	    1094 B/op	      20 allocs/op
+BenchmarkCEL_VeryComplexCondition-10    	 4773866	       533.7 ns/op	    1254 B/op	      25 allocs/op
+BenchmarkCEL_DryRunMode-10              	 4596318	       530.2 ns/op	    1241 B/op	      22 allocs/op
+PASS
+ok  	github.com/DataDog/policy-benchmark	35.553s
