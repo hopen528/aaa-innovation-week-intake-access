@@ -199,21 +199,48 @@ RestrictionPolicyKey {
 
 ## Implementation Plan - Innovation Week
 
-### Day 1: API + UI Implementation
+### Day 1: API + UI Implementation ✅ COMPLETED
 **Goal:** Create IP policy API and management UI
 
-- [x] Add "api_key" resource type to namespace
-- [x] Create 3 API endpoints in rbac-public
-  - `POST /api/v1/orgs/{org_uuid}/ip-policies` - Create with `{resource_id, blocked_cidrs, allowed_cidrs, mode}`
-  - `GET /api/v1/orgs/{org_uuid}/ip-policies` - List/filter by resource_id
-  - `DELETE /api/v1/orgs/{org_uuid}/ip-policies/{id}` - Delete
-- [x] Backend generates CEL expressions from CIDR lists
-- [x] FRAMES notification on policy create/delete
-- [x] UI at `/organization-settings/ip-policies` with table, add/edit/delete
-- [x] Contextual UI in API key detail modal
-- [x] API integration hooks in web-ui
+#### Backend (dd-source: `ACCESSINT-1112-ip-policy-crud-endpoints`)
 
-**Deliverable:** End-to-end IP policy management (API + UI + FRAMES)
+- [x] Add "api_key" resource type, "cel_expression" principal type, and "access_policy" relation to database enums
+  - Migration: `000107_add_ip_policy_types.up.sql`
+- [x] Create 4 API endpoints in rbac-public (`/api/unstable/orgs/{org_uuid}/ip-policies`)
+  - `POST` - Create IP policy with `{resource_id, blocked_cidrs, allowed_cidrs, mode}`
+  - `GET` - List all policies or filter by `?resource_id=`
+  - `PATCH /{resource_id}` - Update CIDRs and/or mode
+  - `DELETE /{resource_id}` - Delete policy
+- [x] Backend generates CEL expressions from CIDR lists
+  - Blocked: `!(cidr('x.x.x.x/x').containsIP(ip(request.source_ip)) || ...)`
+  - Allowed: `cidr('x.x.x.x/x').containsIP(ip(request.source_ip)) || ...`
+  - Combined: allowlist AND NOT blocklist
+- [x] FRAMES notifier integration for policy changes
+  - New `frames.Notifier` implementation with async notifications
+  - Notifies on create, update, and delete operations
+- [x] Policy mode encoded in `principal_id` field (`ip-policy-{disabled|dryrun|enforced}`)
+
+#### Frontend (web-ui: `erica.zhong/ACCESSINT-1112-ip-policies-ui`)
+
+- [x] New page at `/organization-settings/ip-policies`
+  - `PageIpPolicies.tsx` with title, info box, and table
+  - Added to org settings navigation and routes
+- [x] `IpPoliciesTable` component
+  - Displays resource ID, blocked/allowed CIDRs, and mode badge
+  - Edit and delete actions per row
+  - Mode badge colors: enforced (danger), dry_run (warning), disabled (default)
+- [x] `IpPolicyAddModal` for creating new policies
+  - Resource ID input (org-wide `*` or specific key ID)
+  - Blocked/allowed CIDRs input
+  - Mode selector (disabled/dry_run/enforced)
+- [x] `IpPolicyEditModal` for updating existing policies
+- [x] API hooks using react-query
+  - `useGetApiUnstableOrgsIpPolicies`
+  - `usePostApiUnstableOrgsIpPolicies`
+  - `useDeleteApiUnstableOrgsIpPoliciesId`
+- [x] Feature flag: `ip_policies_ui`
+
+**Deliverable:** End-to-end IP policy management (API + UI + FRAMES) ✅
 
 ### Day 2: Data Plane Implementation (CEL Evaluator + Integration)
 **Goal:** Build policy reader, evaluator, and integrate into authenticator-intake
@@ -741,11 +768,18 @@ dd-go/
   - Review "would block" metrics
   - Identify false positives
   - Tune policies as needed
+- [ ] Demo preparation
+  - Create demo policy via UI
+  - Show FRAMES propagation
+  - Show request blocked in real-time
+  - Demo mode transitions (disabled → dry_run → enforced)
+  - Show metrics dashboard
+  - Demo future flexibility (add country/time rules)
 
-**Deliverable:** Validated in staging, ready for production rollout
+**Deliverable:** Validated in staging, demo ready
 
-### Day 4: Production Rollout & Demo
-**Goal:** Deploy to production and prepare demo
+### Post-Innovation Week: Production Rollout
+**Goal:** Deploy to production (out of scope for Innovation Week)
 
 - [ ] Gradual production rollout
   - Deploy to 1% → 10% → 100% of pods
@@ -755,19 +789,12 @@ dd-go/
   - Update validated policies to `mode: "enforced"`
   - Monitor blocked request rates
   - Verify no false positives
-- [ ] Demo preparation
-  - Create demo policy via UI
-  - Show FRAMES propagation
-  - Show request blocked in real-time
-  - Demo mode transitions (disabled → dry_run → enforced)
-  - Show metrics dashboard
-  - Demo future flexibility (add country/time rules)
 - [ ] Documentation
   - Runbook for policy management
   - Troubleshooting guide
   - Metrics and alerting setup
 
-**Deliverable:** Production IP blocking system + demo ready
+**Deliverable:** Production IP blocking system
 
 ## Simplified API Implementation
 
@@ -776,8 +803,11 @@ dd-go/
 Instead of generic restriction policy format, create a simple IP policy endpoint that generates CEL expressions:
 
 ```go
-// New consolidated endpoint in rbac-public
-POST /api/v1/orgs/{org_uuid}/ip-policies
+// Implemented endpoints in rbac-public (unstable API)
+POST   /api/unstable/orgs/{org_uuid}/ip-policies              // Create
+GET    /api/unstable/orgs/{org_uuid}/ip-policies              // List (optional ?resource_id filter)
+PATCH  /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} // Update
+DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} // Delete
 
 // Request body (simple!)
 {
@@ -836,13 +866,14 @@ func (s *PolicyService) CreateIPPolicy(apiKeyID string, req *IPPolicyRequest) er
 
 ## How to Create IP Policies
 
-### Consolidated API (3 Endpoints)
+### Consolidated API (4 Endpoints)
 
 **All policies managed through single endpoint:**
 ```
-POST   /api/v1/orgs/{org_uuid}/ip-policies      # Create policy
-GET    /api/v1/orgs/{org_uuid}/ip-policies      # List policies
-PATCH  /api/v1/orgs/{org_uuid}/ip-policies/{id} # Update mode
+POST   /api/unstable/orgs/{org_uuid}/ip-policies              # Create policy
+GET    /api/unstable/orgs/{org_uuid}/ip-policies              # List policies
+PATCH  /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} # Update CIDRs/mode
+DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} # Delete policy
 ```
 
 **Scope determined by `resource_id` in request body:**
@@ -888,8 +919,9 @@ PATCH  /api/v1/orgs/{org_uuid}/ip-policies/{id} # Update mode
      cidr('10.0.0.0/8').containsIP(ip(request.source_ip)))
    ```
 3. Stores in RelationTuple condition field
-4. FRAMES streams to all pods
-5. AuthN sidecar compiles and evaluates CEL with K8s library (~0.3μs)
+4. FRAMES notified of context change
+5. FRAMES streams to all pods
+6. AuthN sidecar compiles and evaluates CEL with K8s library (~0.3μs)
 
 **Benefits:**
 - ✅ Extremely simple - just a list of CIDRs
@@ -918,7 +950,7 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 
 **Generated CEL expression:**
 ```javascript
-!cidr('1.2.3.0/24').containsIP(ip(request.source_ip))
+!(cidr('1.2.3.0/24').containsIP(ip(request.source_ip)))
 ```
 
 ### Example 2: Key-Specific Block (Single API Key)
@@ -926,7 +958,7 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 Block IPs for one specific API key:
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/unstable/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
     "resource_id": "key-456",
@@ -939,7 +971,7 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 
 **Generated CEL expression:**
 ```javascript
-!cidr('10.0.0.0/8').containsIP(ip(request.source_ip))
+!(cidr('10.0.0.0/8').containsIP(ip(request.source_ip)))
 ```
 
 ### Example 3: Org-Wide Allowlist (Corporate Network Only)
@@ -947,7 +979,7 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 Only allow requests from corporate network (all API keys):
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/unstable/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
     "resource_id": "*",
@@ -963,8 +995,8 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 
 **Generated CEL expression:**
 ```javascript
-cidr('10.0.0.0/8').containsIP(ip(request.source_ip)) ||
-cidr('172.16.0.0/12').containsIP(ip(request.source_ip))
+(cidr('10.0.0.0/8').containsIP(ip(request.source_ip)) ||
+ cidr('172.16.0.0/12').containsIP(ip(request.source_ip)))
 ```
 
 ### Example 4: Combined Allowlist + Blocklist
@@ -972,7 +1004,7 @@ cidr('172.16.0.0/12').containsIP(ip(request.source_ip))
 Allow corporate network but block specific problem subnet:
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/unstable/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
     "resource_id": "*",
@@ -986,8 +1018,8 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 
 **Generated CEL expression:**
 ```javascript
-cidr('10.0.0.0/8').containsIP(ip(request.source_ip)) &&
-!cidr('10.0.1.0/24').containsIP(ip(request.source_ip))
+(cidr('10.0.0.0/8').containsIP(ip(request.source_ip))) &&
+!(cidr('10.0.1.0/24').containsIP(ip(request.source_ip)))
 ```
 
 ### Example 5: Hierarchical - Org-Wide + Key-Specific
@@ -996,7 +1028,7 @@ cidr('10.0.0.0/8').containsIP(ip(request.source_ip)) &&
 
 **Step 1: Org-wide policy**
 ```bash
-POST /api/v1/orgs/org-123/ip-policies
+POST /api/unstable/orgs/org-123/ip-policies
 {
   "resource_id": "*",
   "blocked_cidrs": ["192.168.0.0/16"],
@@ -1007,7 +1039,7 @@ POST /api/v1/orgs/org-123/ip-policies
 
 **Step 2: Key-specific additional block**
 ```bash
-POST /api/v1/orgs/org-123/ip-policies
+POST /api/unstable/orgs/org-123/ip-policies
 {
   "resource_id": "key-789",
   "blocked_cidrs": ["172.16.0.0/12"],
@@ -1051,7 +1083,7 @@ No proto changes needed! The CEL evaluator parses the suffix to determine mode.
 ### Example: Create Policy in Dry Run Mode
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
+curl -X POST http://localhost:8080/api/unstable/orgs/org-123/ip-policies \
   -H "Content-Type: application/json" \
   -d '{
     "resource_id": "my-api-key-123",
@@ -1061,26 +1093,26 @@ curl -X POST http://localhost:8080/api/v1/orgs/org-123/ip-policies \
 ```
 
 **What happens:**
-1. Policy created with `object_id = "expr-abc123-dryrun"`
-2. Streams to FRAMES → all pods receive it
+1. Policy created with `principal_id = "ip-policy-dryrun"`
+2. FRAMES notified → streams to all pods
 3. CEL evaluator compiles it as a dry run policy
 4. Requests matching 192.168.1.0/24 are evaluated but **NOT blocked**
-5. Logs show: `[DRY_RUN] Would have BLOCKED by policy expr-abc123-dryrun`
+5. Logs show: `[DRY_RUN] Would have BLOCKED by policy ip-policy-dryrun`
 6. Metrics track: `policy_evaluations{mode="dry_run", would_block="true"}`
 
 **Policy Lifecycle (disabled → dry_run → enforced):**
 ```bash
 # Step 1: Create disabled policy
-POST /api/v1/orgs/org-123/ip-policies {"resource_id": "key-123", "blocked_cidrs": ["192.168.1.0/24"], "mode": "disabled"}
+POST /api/unstable/orgs/org-123/ip-policies {"resource_id": "key-123", "blocked_cidrs": ["192.168.1.0/24"], "mode": "disabled"}
 
 # Step 2: Test in dry run
-PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "dry_run"}
+PATCH /api/unstable/orgs/org-123/ip-policies/key-123 {"mode": "dry_run"}
 
 # Step 3: Promote to enforcement
-PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "enforced"}
+PATCH /api/unstable/orgs/org-123/ip-policies/key-123 {"mode": "enforced"}
 
 # Step 4: Temporarily disable
-PATCH /api/v1/orgs/org-123/ip-policies/expr-abc123 {"mode": "disabled"}
+PATCH /api/unstable/orgs/org-123/ip-policies/key-123 {"mode": "disabled"}
 ```
 
 ### Metrics by Mode
@@ -1528,12 +1560,6 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
 **Recommendation**: Use CEL with Kubernetes library for Innovation Week - extremely fast (0.4μs), battle-tested, flexible, no future rewrites needed
 
 **Key Insight from Benchmarks:** CEL with K8s library evaluation is extremely fast (~0.3μs). The compilation cost (~35μs) is paid once on startup/update, then cached programs are reused for millions of requests.
-
-## Implementation Status
-
-**Current Phase:** Day 1 Complete ✅
-**Next:** Day 2 - CEL Evaluator + Integration
-**Started:** Innovation Week 2026
 
 ## Future Extension Benefits (CEL Advantage)
 
