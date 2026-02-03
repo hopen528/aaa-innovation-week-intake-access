@@ -220,25 +220,7 @@ RestrictionPolicyKey {
 
 #### 2.1 Policy Context Infrastructure (dd-go/pkg/authdatastore)
 
-**2.1.1 Org UUID Context** (`org_uuid_context.go`)
-Create org ID → org UUID mapping using existing FRAMES context:
-
-```go
-package authdatastore
-
-// NewOrgUUIDContext creates a context resolver for org ID → org UUID mapping
-// Uses existing AAA_ORG_UUID_CONTEXT from FRAMES
-func NewOrgUUIDContext(cacheSize int64) ContextCredentialsResolver[*OrgUUIDProto] {
-    // Similar pattern to api_key_context.go
-    // Context type: "AAA_ORG_UUID_CONTEXT" (already exists in zoltron codec.go)
-}
-```
-
-**Code pointers:**
-- Pattern: `/Users/haopeng.liu/dd/newdd-go/dd-go/pkg/authdatastore/api_key_context.go:35-65`
-- Codec reference: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/codec.go:261-307`
-
-**2.1.2 Restriction Policy Frames** (`restriction_policy_frames.go`)
+**2.1.1 Restriction Policy Frames** (`restriction_policy_frames.go`)
 Copy frame codec and proto from dd-source for innovation week:
 
 ```go
@@ -263,12 +245,12 @@ func (c *RestrictionPolicyCodec) ContextType() string  // "ZOLTRON_RESTRICTION_P
 ```
 
 **Code to copy:**
-- Source codec: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/codec.go:101-212`
-- Source proto: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/proto/restriction_policy.proto`
-- Frame reader pattern: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:124-144`
+- Source codec: `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/codec.go:101-212`
+- Source proto: `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/proto/restriction_policy.proto`
+- Frame reader pattern: `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:124-144`
 
-**2.1.3 Policy Reader** (`restriction_policy_context.go`)
-FRAMES reader wrapper for restriction policies:
+**2.1.2 Policy Reader** (`restriction_policy_context.go`)
+FRAMES reader wrapper for restriction policies with internal org UUID mapping:
 
 ```go
 package authdatastore
@@ -279,10 +261,12 @@ import (
 )
 
 // PolicyReader provides lookup interface for restriction policies
+// Accepts orgID (int32) and internally handles org UUID conversion
 type PolicyReader interface {
-    // Get looks up policy for given org UUID, resource type, and resource ID
+    // Get looks up policy for given org ID, resource type, and resource ID
+    // Internally converts orgID → orgUUID for FRAMES lookup
     // Returns nil if no policy exists (not an error)
-    Get(ctx context.Context, orgUUID uuid.UUID, resourceType, resourceID string) (*framespb.RestrictionPolicyValue, error)
+    Get(ctx context.Context, orgID int32, resourceType, resourceID string) (*framespb.RestrictionPolicyValue, error)
 
     // WaitReady blocks until FRAMES snapshot is loaded
     WaitReady(ctx context.Context, timeout time.Duration) error
@@ -295,11 +279,12 @@ type PolicyReader interface {
 }
 
 type policyReader struct {
-    codec  *RestrictionPolicyCodec
-    reader frames.Reader[RestrictionPolicyKey, *framespb.RestrictionPolicyValue]
+    codec       *RestrictionPolicyCodec
+    reader      frames.Reader[RestrictionPolicyKey, *framespb.RestrictionPolicyValue]
+    orgUUIDCtx  ContextCredentialsResolver[*OrgUUIDProto]  // Internal: orgID → orgUUID
 }
 
-func NewPolicyReader(contextRootPath string) (PolicyReader, error) {
+func NewPolicyReader(contextRootPath string, cacheSize int64) (PolicyReader, error) {
     codec := &RestrictionPolicyCodec{
         resourceTypeValidator: func(rt string) bool {
             return rt == "api_key"  // Only support api_key for now
@@ -311,13 +296,28 @@ func NewPolicyReader(contextRootPath string) (PolicyReader, error) {
         frames.WithContextRootPath(contextRootPath),
     )
 
+    // Create org UUID context for internal orgID → orgUUID conversion
+    orgUUIDCtx := NewOrgUUIDContext(cacheSize)
+
     return &policyReader{
-        codec:  codec,
-        reader: reader,
+        codec:      codec,
+        reader:     reader,
+        orgUUIDCtx: orgUUIDCtx,
     }, nil
 }
 
-func (r *policyReader) Get(ctx context.Context, orgUUID uuid.UUID, resourceType, resourceID string) (*framespb.RestrictionPolicyValue, error) {
+func (r *policyReader) Get(ctx context.Context, orgID int32, resourceType, resourceID string) (*framespb.RestrictionPolicyValue, error) {
+    // Step 1: Convert orgID → orgUUID internally
+    orgUUIDProto, err := r.orgUUIDCtx.Get(ctx, orgID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to lookup org UUID for orgID %d: %w", orgID, err)
+    }
+    orgUUID, err := uuid.Parse(orgUUIDProto.UUID)
+    if err != nil {
+        return nil, fmt.Errorf("invalid org UUID: %w", err)
+    }
+
+    // Step 2: Lookup from FRAMES using orgUUID
     key := RestrictionPolicyKey{
         OrgUUID:      orgUUID,
         ResourceType: resourceType,
@@ -327,9 +327,12 @@ func (r *policyReader) Get(ctx context.Context, orgUUID uuid.UUID, resourceType,
 }
 ```
 
+**Note:** Org UUID context is created internally by PolicyReader. The org UUID conversion is an implementation detail hidden from the evaluator.
+
 **Code pointers:**
-- FRAMES reader API: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:35-47`
-- Example usage: `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:78-95`
+- FRAMES reader API: `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:35-47`
+- Example usage: `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:78-95`
+- Org UUID context pattern: `~/dd/newdd-go/dd-go/pkg/authdatastore/api_key_context.go:35-65`
 
 #### 2.2 Policy Evaluator (dd-go/apps/authenticator-intake/pkg/policyeval)
 
@@ -357,8 +360,7 @@ type PolicyEvaluator struct {
     mu           sync.RWMutex
     env          *cel.Env
     cache        map[string]*CachedPolicy  // Key: "<orgID>:<apiKeyUUID>"
-    policyReader authdatastore.PolicyReader
-    orgUUIDCtx   authdatastore.ContextCredentialsResolver[*OrgUUIDProto]
+    policyReader authdatastore.PolicyReader  // Handles orgID → orgUUID internally
 }
 ```
 
@@ -382,15 +384,13 @@ func (e *PolicyEvaluator) Initialize(contextRootPath string) error {
     e.cache = make(map[string]*CachedPolicy)
 
     // Step 3: Create policy reader (FRAMES)
-    e.policyReader, err = authdatastore.NewPolicyReader(contextRootPath)
+    // Policy reader internally handles orgID → orgUUID conversion
+    e.policyReader, err = authdatastore.NewPolicyReader(contextRootPath, 10000)
     if err != nil {
         return fmt.Errorf("failed to create policy reader: %w", err)
     }
 
-    // Step 4: Create org UUID context
-    e.orgUUIDCtx = authdatastore.NewOrgUUIDContext(10000)
-
-    // Step 5: Wait for FRAMES to be ready
+    // Step 4: Wait for FRAMES to be ready
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
 
@@ -407,38 +407,27 @@ func (e *PolicyEvaluator) Initialize(contextRootPath string) error {
 ```go
 // CheckAccess evaluates policy with hash-based cache invalidation
 // Flow:
-// 1. Convert orgID (int32) → orgUUID (uuid.UUID)
-// 2. Lookup policy from FRAMES reader
-// 3. Calculate hash of policy proto
-// 4. Check cache:
+// 1. Lookup policy from FRAMES reader (reader handles orgID → orgUUID internally)
+// 2. Calculate hash of policy proto
+// 3. Check cache:
 //    - Hash matches → use cached program
 //    - Hash differs or missing → compile new program, update cache
-// 5. Evaluate and return decision
+// 4. Evaluate and return decision
 func (e *PolicyEvaluator) CheckAccess(orgID int32, apiKeyUUID string, ctx *RequestContext) (*AccessDecision, error) {
     startTime := time.Now()
 
-    // Step 1: Convert orgID to orgUUID
-    orgUUIDProto, err := e.orgUUIDCtx.Get(context.Background(), orgID)
-    if err != nil {
-        return nil, fmt.Errorf("failed to lookup org UUID for orgID %d: %w", orgID, err)
-    }
-    orgUUID, err := uuid.Parse(orgUUIDProto.UUID)
-    if err != nil {
-        return nil, fmt.Errorf("invalid org UUID: %w", err)
-    }
-
-    // Step 2: Check org-wide policy first (orgID:*)
+    // Step 1: Check org-wide policy first (orgID:*)
     orgWideKey := fmt.Sprintf("%d:*", orgID)
-    if decision, err := e.evaluateWithCache(orgID, orgUUID, "*", orgWideKey, ctx); err != nil {
+    if decision, err := e.evaluateWithCache(orgID, "*", orgWideKey, ctx); err != nil {
         return nil, err
     } else if decision != nil && !decision.Allowed && decision.Mode == PolicyModeEnforced {
         decision.EvaluationTime = time.Since(startTime)
         return decision, nil
     }
 
-    // Step 3: Check key-specific policy (orgID:apiKeyUUID)
+    // Step 2: Check key-specific policy (orgID:apiKeyUUID)
     keySpecificKey := fmt.Sprintf("%d:%s", orgID, apiKeyUUID)
-    decision, err := e.evaluateWithCache(orgID, orgUUID, apiKeyUUID, keySpecificKey, ctx)
+    decision, err := e.evaluateWithCache(orgID, apiKeyUUID, keySpecificKey, ctx)
     if err != nil {
         return nil, err
     }
@@ -456,9 +445,9 @@ func (e *PolicyEvaluator) CheckAccess(orgID int32, apiKeyUUID string, ctx *Reque
 }
 
 // evaluateWithCache handles hash-based cache check and compilation
-func (e *PolicyEvaluator) evaluateWithCache(orgID int32, orgUUID uuid.UUID, resourceID, cacheKey string, ctx *RequestContext) (*AccessDecision, error) {
-    // Step 1: Lookup policy from FRAMES
-    policyProto, err := e.policyReader.Get(context.Background(), orgUUID, "api_key", resourceID)
+func (e *PolicyEvaluator) evaluateWithCache(orgID int32, resourceID, cacheKey string, ctx *RequestContext) (*AccessDecision, error) {
+    // Step 1: Lookup policy from FRAMES (reader handles orgID → orgUUID internally)
+    policyProto, err := e.policyReader.Get(context.Background(), orgID, "api_key", resourceID)
     if err != nil {
         return nil, fmt.Errorf("failed to lookup policy: %w", err)
     }
@@ -559,6 +548,7 @@ func (e *PolicyEvaluator) compilePolicy(policyProto *framespb.RestrictionPolicyV
 - If proto unchanged → hash matches → use cached program (no recompilation)
 - If proto changed → hash differs → recompile and update cache
 - Compilation cost (~35μs) only paid on cache miss
+- PolicyReader abstracts org UUID conversion - evaluator only works with orgID
 
 #### 2.3 Integration in AuthN Handler
 
@@ -667,9 +657,8 @@ policy_compilation_duration_us{org_id}  // Compilation time on cache miss
 ```
 dd-go/
 ├── pkg/authdatastore/
-│   ├── org_uuid_context.go              # Org ID → UUID mapping
 │   ├── restriction_policy_frames.go     # Copied codec from dd-source
-│   ├── restriction_policy_context.go    # FRAMES reader wrapper
+│   ├── restriction_policy_context.go    # FRAMES reader wrapper (with internal org UUID mapping)
 │   └── proto/
 │       └── restriction_policy.proto     # Copied from dd-source
 │
@@ -682,15 +671,17 @@ dd-go/
         └── check.go                     # Integration point (updated)
 ```
 
+**Note:** Org UUID context is created internally by `restriction_policy_context.go`, not exposed to evaluator.
+
 #### 2.7 Code Pointer Reference
 
 | Component | Source Reference | Target Location |
 |-----------|------------------|-----------------|
-| Org UUID Context | `/Users/haopeng.liu/dd/newdd-go/dd-go/pkg/authdatastore/api_key_context.go:35-65` | `dd-go/pkg/authdatastore/org_uuid_context.go` |
-| RestrictionPolicy Codec | `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/codec.go:101-212` | `dd-go/pkg/authdatastore/restriction_policy_frames.go` |
-| RestrictionPolicy Proto | `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/proto/restriction_policy.proto` | `dd-go/pkg/authdatastore/proto/restriction_policy.proto` |
-| FRAMES Reader Pattern | `/Users/haopeng.liu/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:124-144` | `dd-go/pkg/authdatastore/restriction_policy_context.go` |
-| CEL Evaluator Pattern | `/Users/haopeng.liu/dd/aaa-innovation-week-intake-access/benchmark/cel_evaluator.go` | `dd-go/apps/authenticator-intake/pkg/policyeval/evaluator.go` |
+| RestrictionPolicy Codec | `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/codec.go:101-212` | `dd-go/pkg/authdatastore/restriction_policy_frames.go` |
+| RestrictionPolicy Proto | `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/proto/restriction_policy.proto` | `dd-go/pkg/authdatastore/proto/restriction_policy.proto` |
+| FRAMES Reader Pattern | `~/dd/dd-source/domains/aaa/apps/zoltron/internal/frames/reader.go:124-144` | `dd-go/pkg/authdatastore/restriction_policy_context.go` |
+| Org UUID Context (internal) | `~/dd/newdd-go/dd-go/pkg/authdatastore/api_key_context.go:35-65` | Used internally in `restriction_policy_context.go` |
+| CEL Evaluator Pattern | `~/dd/aaa-innovation-week-intake-access/benchmark/cel_evaluator.go` | `dd-go/apps/authenticator-intake/pkg/policyeval/evaluator.go` |
 
 ### Day 3: Staging Deployment & Validation
 **Goal:** Deploy to staging and validate end-to-end
