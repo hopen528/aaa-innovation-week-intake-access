@@ -89,28 +89,29 @@ Build an **IP-based access control system** using CEL (Common Expression Languag
 ```protobuf
 // This already exists in Zoltron!
 message RelationTuple {
-    string subject_type = 1;  // "api_key"
-    string subject_id = 2;    // "key-123"
-    string relation = 3;      // "access_policy"
-    string object_type = 4;   // "cel_expression"
-    string object_id = 5;     // "expr-uuid"
-    string condition = 6;     // CEL expression: "!cidr('192.168.1.0/24').containsIP(ip(request.source_ip))"
+    string resource_type = 1;   // "api_key"
+    string resource_id = 2;     // "*" (org-wide) or "key-123" (key-specific)
+    string relation = 3;        // "access_policy"
+    string principal_type = 4;  // "cel_expression"
+    string principal_id = 5;    // "ip-policy-{mode}" where mode is: disabled | dryrun | enforced
+    string condition = 6;       // CEL expression: "!cidr('192.168.1.0/24').containsIP(ip(request.source_ip))"
 }
 ```
 
 **That's it!** This tuple format stores CEL expressions:
-- ✅ Subject: Which API key
+- ✅ Resource: Which API key (or `*` for org-wide)
 - ✅ Relation: "access_policy"
+- ✅ Principal ID: Policy mode encoding
 - ✅ Condition: CEL expression to evaluate
 
 ### Example Data
 
 **Stored in Zoltron database:**
 ```sql
-subject_type | subject_id | relation      | object_type     | object_id | condition
--------------|------------|---------------|-----------------|-----------|------------------------------------------
-api_key      | key-123    | access_policy | cel_expression  | expr-1    | !cidr('192.168.1.0/24').containsIP(ip(request.source_ip))
-api_key      | key-456    | access_policy | cel_expression  | expr-2    | request.country != 'CN' && !cidr('1.2.3.0/24').containsIP(ip(request.source_ip))
+resource_type | resource_id | relation      | principal_type  | principal_id         | condition
+--------------|-------------|---------------|-----------------|----------------------|------------------------------------------
+api_key       | *           | access_policy | cel_expression  | ip-policy-enforced   | !cidr('192.168.1.0/24').containsIP(ip(request.source_ip))
+api_key       | key-456     | access_policy | cel_expression  | ip-policy-dryrun     | !cidr('1.2.3.0/24').containsIP(ip(request.source_ip))
 ```
 
 **Flows to FRAMES:** Same format, already streaming!
@@ -119,12 +120,12 @@ api_key      | key-456    | access_policy | cel_expression  | expr-2    | reques
 ```go
 // Read RelationTuple from FRAMES
 tuple := &RelationTuple{
-    SubjectType: "api_key",
-    SubjectID:   "key-123",
-    Relation:    "access_policy",
-    ObjectType:  "cel_expression",
-    ObjectID:    "expr-1",
-    Condition:   "!cidr('192.168.1.0/24').containsIP(ip(request.source_ip))",
+    ResourceType:  "api_key",
+    ResourceID:    "*",  // or "key-123" for key-specific
+    Relation:      "access_policy",
+    PrincipalType: "cel_expression",
+    PrincipalID:   "ip-policy-enforced",
+    Condition:     "!cidr('192.168.1.0/24').containsIP(ip(request.source_ip))",
 }
 
 // Compile CEL expression (one-time cost: ~35μs)
@@ -132,7 +133,7 @@ ast, _ := celEnv.Compile(tuple.Condition)
 prg, _ := celEnv.Program(ast)
 
 // Store compiled program for fast evaluation (~0.3μs per request)
-evaluator.programs[tuple.SubjectID] = prg
+evaluator.programs[tuple.ResourceID] = prg
 ```
 
 **No new protos needed!** ✅
@@ -550,27 +551,27 @@ func (e *PolicyEvaluator) evaluateWithCache(orgID int32, orgUUID uuid.UUID, reso
     return e.evaluateProgram(program, ctx)
 }
 
-// compilePolicy compiles RelationSubjects from proto into CEL program
+// compilePolicy compiles RelationPrincipals from proto into CEL program
 func (e *PolicyEvaluator) compilePolicy(policyProto *framespb.RestrictionPolicyValue) (*CachedPolicy, error) {
-    // Extract CEL expression from RelationSubjects
+    // Extract CEL expression from RelationPrincipals
     // Format in proto:
     //   relations[0].relation = "access_policy"
-    //   relations[0].subjects[0].condition = CEL expression
-    //   relations[0].subjects[0].subject_id = mode suffix
+    //   relations[0].principals[0].condition = CEL expression
+    //   relations[0].principals[0].principal_id = "ip-policy-{mode}"
 
     for _, rel := range policyProto.GetRelations() {
         if rel.GetRelation() != "access_policy" {
             continue
         }
 
-        for _, subject := range rel.GetSubjects() {
-            expression := subject.GetCondition()
+        for _, principal := range rel.GetPrincipals() {
+            expression := principal.GetCondition()
             if expression == "" {
                 continue
             }
 
-            // Parse mode from subject_id
-            mode := parsePolicyMode(subject.GetSubjectId())
+            // Parse mode from principal_id
+            mode := parsePolicyMode(principal.GetPrincipalId())
 
             // Compile CEL expression (~35μs - one-time cost)
             ast, issues := e.env.Compile(expression)
@@ -586,7 +587,7 @@ func (e *PolicyEvaluator) compilePolicy(policyProto *framespb.RestrictionPolicyV
             return &CachedPolicy{
                 Program:  prg,
                 Mode:     mode,
-                PolicyID: subject.GetSubjectId(),
+                PolicyID: principal.GetPrincipalId(),
             }, nil
         }
     }
@@ -679,7 +680,7 @@ policy_compilation_duration_us{org_id}  // Compilation time on cache miss
 // Logs
 {"level": "info", "msg": "Policy evaluation",
  "org_id": 123, "api_key_uuid": "key-456",
- "policy_id": "expr-789", "mode": "enforced",
+ "policy_id": "ip-policy-enforced", "mode": "enforced",
  "blocked": false, "eval_time_us": 0.35,
  "cache_hit": true}
 ```
@@ -821,35 +822,45 @@ DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} // Delete
 ### Translation to RelationTuples with CEL (Backend)
 
 ```go
-func (s *PolicyService) CreateIPPolicy(apiKeyID string, req *IPPolicyRequest) error {
+func (s *PolicyService) CreateIPPolicy(orgUUID, resourceID string, req *IPPolicyRequest) error {
     // Generate CEL expression from CIDRs
     var conditions []string
 
-    // Block conditions (using Kubernetes library syntax)
-    for _, cidr := range req.BlockedCIDRs {
-        conditions = append(conditions, fmt.Sprintf("cidr('%s').containsIP(ip(request.source_ip))", cidr))
+    // Allowed conditions (using Kubernetes library syntax)
+    if len(req.AllowedCIDRs) > 0 {
+        for _, cidr := range req.AllowedCIDRs {
+            conditions = append(conditions, fmt.Sprintf("cidr('%s').containsIP(ip(request.source_ip))", cidr))
+        }
     }
 
-    // Build final expression
-    var celExpr string
-    if len(conditions) > 0 {
-        // Block if IP matches any blocked CIDR
-        celExpr = fmt.Sprintf("!(%s)", strings.Join(conditions, " || "))
+    // Block conditions
+    if len(req.BlockedCIDRs) > 0 {
+        blockConditions := []string{}
+        for _, cidr := range req.BlockedCIDRs {
+            blockConditions = append(blockConditions, fmt.Sprintf("cidr('%s').containsIP(ip(request.source_ip))", cidr))
+        }
+        conditions = append(conditions, fmt.Sprintf("!(%s)", strings.Join(blockConditions, " || ")))
     }
 
-    // Generate object_id with mode metadata embedded
-    // Format: "expr-{uuid}-{mode}" where mode is: disabled | dryrun | enforced
-    baseID := fmt.Sprintf("expr-%s", uuid.New().String())
-    objectID := fmt.Sprintf("%s-%s", baseID, req.Mode)
+    celExpr := strings.Join(conditions, " && ")
+
+    // Generate principal_id with mode metadata embedded
+    // Format: "ip-policy-{mode}" where mode is: disabled | dryrun | enforced
+    modeSuffix := req.Mode
+    if req.Mode == "dry_run" {
+        modeSuffix = "dryrun"  // No underscore in suffix
+    }
+    principalID := fmt.Sprintf("ip-policy-%s", modeSuffix)
 
     // Create RelationTuple with CEL expression
     tuple := RelationTuple{
-        SubjectType: "api_key",
-        SubjectID:   apiKeyID,
-        Relation:    "access_policy",
-        ObjectType:  "cel_expression",
-        ObjectID:    objectID,  // Dry run metadata encoded here
-        Condition:   celExpr,
+        OrgID:         orgUUID,
+        ResourceType:  "api_key",
+        ResourceID:    resourceID,  // "*" for org-wide, "key-123" for key-specific
+        Relation:      "access_policy",
+        PrincipalType: "cel_expression",
+        PrincipalID:   principalID,  // Mode encoded here
+        Condition:     celExpr,
     }
 
     // Store using existing RelationTuple service
@@ -1073,10 +1084,10 @@ Each policy has a `mode` that controls how it's evaluated:
 
 ### How It Works
 
-The `mode` is embedded in the RelationTuple's `object_id`:
-- **Disabled**: `object_id = "expr-{uuid}-disabled"`
-- **Dry run**: `object_id = "expr-{uuid}-dryrun"`
-- **Enforced**: `object_id = "expr-{uuid}-enforced"`
+The `mode` is embedded in the RelationTuple's `principal_id`:
+- **Disabled**: `principal_id = "ip-policy-disabled"`
+- **Dry run**: `principal_id = "ip-policy-dryrun"`
+- **Enforced**: `principal_id = "ip-policy-enforced"`
 
 No proto changes needed! The CEL evaluator parses the suffix to determine mode.
 
@@ -1093,7 +1104,7 @@ curl -X POST http://localhost:8080/api/unstable/orgs/org-123/ip-policies \
 ```
 
 **What happens:**
-1. Policy created with `principal_id = "ip-policy-dryrun"`
+1. Policy created with `principal_id = "ip-policy-dryrun"` (note: no underscore)
 2. FRAMES notified → streams to all pods
 3. CEL evaluator compiles it as a dry run policy
 4. Requests matching 192.168.1.0/24 are evaluated but **NOT blocked**
@@ -1119,11 +1130,11 @@ PATCH /api/unstable/orgs/org-123/ip-policies/key-123 {"mode": "disabled"}
 
 ```
 # Policy evaluations by mode and result
-policy_evaluations_total{api_key="key-123", policy_id="expr-abc", mode="disabled"} 0
-policy_evaluations_total{api_key="key-123", policy_id="expr-abc", mode="dry_run", would_block="true"} 42
-policy_evaluations_total{api_key="key-123", policy_id="expr-abc", mode="dry_run", would_block="false"} 158
-policy_evaluations_total{api_key="key-123", policy_id="expr-abc", mode="enforced", blocked="true"} 38
-policy_evaluations_total{api_key="key-123", policy_id="expr-abc", mode="enforced", blocked="false"} 162
+policy_evaluations_total{api_key="key-123", policy_id="ip-policy-disabled", mode="disabled"} 0
+policy_evaluations_total{api_key="key-123", policy_id="ip-policy-dryrun", mode="dry_run", would_block="true"} 42
+policy_evaluations_total{api_key="key-123", policy_id="ip-policy-dryrun", mode="dry_run", would_block="false"} 158
+policy_evaluations_total{api_key="key-123", policy_id="ip-policy-enforced", mode="enforced", blocked="true"} 38
+policy_evaluations_total{api_key="key-123", policy_id="ip-policy-enforced", mode="enforced", blocked="false"} 162
 
 # Policy evaluation time by mode
 policy_evaluation_duration_us{api_key="key-123", mode="dry_run"} 18
@@ -1222,60 +1233,60 @@ func (e *CELEvaluator) LoadPolicies(orgID int32, tuples []*RelationTuple) error 
     defer e.mu.Unlock()
 
     for _, tuple := range tuples {
-        if tuple.SubjectType != "api_key" {
+        if tuple.ResourceType != "api_key" {
             continue
         }
         if tuple.Relation != "access_policy" {
             continue
         }
 
-        // SubjectID can be:
+        // ResourceID can be:
         // - "*" for org-wide policies (applies to all keys in org)
-        // - "uuid-123" for key-specific policies (API key UUID)
-        subjectID := tuple.SubjectID
+        // - "key-123" for key-specific policies (API key UUID)
+        resourceID := tuple.ResourceID
         expression := tuple.Condition
 
-        // Parse mode from object_id
-        // Format: "expr-{uuid}-{mode}" where mode is: disabled | dryrun | enforced
-        mode := parsePolicyMode(tuple.ObjectID)
+        // Parse mode from principal_id
+        // Format: "ip-policy-{mode}" where mode is: disabled | dryrun | enforced
+        mode := parsePolicyMode(tuple.PrincipalID)
 
         // Compile CEL expression (~35μs - one-time cost)
         // This expensive operation happens once here, then the compiled
         // program is cached for millions of fast evaluations (~0.3μs each with K8s library)
         ast, issues := e.env.Compile(expression)
         if issues != nil && issues.Err() != nil {
-            return fmt.Errorf("failed to compile expression for api_key:%s: %w", subjectID, issues.Err())
+            return fmt.Errorf("failed to compile expression for api_key:%s: %w", resourceID, issues.Err())
         }
 
         // Create executable program
         prg, err := e.env.Program(ast)
         if err != nil {
-            return fmt.Errorf("failed to create program for api_key:%s: %w", subjectID, err)
+            return fmt.Errorf("failed to create program for api_key:%s: %w", resourceID, err)
         }
 
-        // Store with orgID:subjectID key format
-        // Examples: "123:*" (org-wide), "123:uuid-456" (key-specific)
-        policyKey := fmt.Sprintf("%d:%s", orgID, subjectID)
+        // Store with orgID:resourceID key format
+        // Examples: "123:*" (org-wide), "123:key-456" (key-specific)
+        policyKey := fmt.Sprintf("%d:%s", orgID, resourceID)
         e.policies[policyKey] = &PolicyProgram{
             Program:  prg,
             Mode:     mode,
-            PolicyID: tuple.ObjectID,
+            PolicyID: tuple.PrincipalID,
         }
     }
 
     return nil
 }
 
-// parsePolicyMode extracts mode from object_id
-// Format: "expr-{uuid}-{mode}" → "disabled" | "dry_run" | "enforced"
-func parsePolicyMode(objectID string) PolicyMode {
-    if strings.HasSuffix(objectID, "-disabled") {
+// parsePolicyMode extracts mode from principal_id
+// Format: "ip-policy-{mode}" → "disabled" | "dry_run" | "enforced"
+func parsePolicyMode(principalID string) PolicyMode {
+    if strings.HasSuffix(principalID, "-disabled") {
         return PolicyModeDisabled
     }
-    if strings.HasSuffix(objectID, "-dryrun") {
+    if strings.HasSuffix(principalID, "-dryrun") {
         return PolicyModeDryRun
     }
-    if strings.HasSuffix(objectID, "-enforced") {
+    if strings.HasSuffix(principalID, "-enforced") {
         return PolicyModeEnforced
     }
     // Default to enforced if no suffix (backward compatibility)
@@ -1348,7 +1359,7 @@ func (e *CELEvaluator) CheckAccess(orgID int32, apiKeyUUID string, ctx *RequestC
 }
 
 // evaluatePolicy evaluates a single policy
-func (e *CELEvaluator) evaluatePolicy(policy *PolicyProgram, subjectID string, ctx *RequestContext) (*AccessDecision, error) {
+func (e *CELEvaluator) evaluatePolicy(policy *PolicyProgram, resourceID string, ctx *RequestContext) (*AccessDecision, error) {
     decision := &AccessDecision{
         PolicyID: policy.PolicyID,
         Mode:     policy.Mode,
@@ -1423,15 +1434,15 @@ func (e *CELEvaluator) AddPolicy(orgID int32, tuple *RelationTuple) error {
     e.mu.Lock()
     defer e.mu.Unlock()
 
-    if tuple.SubjectType != "api_key" {
+    if tuple.ResourceType != "api_key" {
         return nil
     }
 
-    subjectID := tuple.SubjectID  // Can be "*" or specific API key UUID
+    resourceID := tuple.ResourceID  // Can be "*" or specific API key UUID
     expression := tuple.Condition
 
-    // Parse mode from object_id
-    mode := parsePolicyMode(tuple.ObjectID)
+    // Parse mode from principal_id
+    mode := parsePolicyMode(tuple.PrincipalID)
 
     // Compile CEL expression (~35μs for this one policy only)
     ast, issues := e.env.Compile(expression)
@@ -1444,12 +1455,12 @@ func (e *CELEvaluator) AddPolicy(orgID int32, tuple *RelationTuple) error {
         return err
     }
 
-    // Update cache with newly compiled program using orgID:subjectID key
-    policyKey := fmt.Sprintf("%d:%s", orgID, subjectID)
+    // Update cache with newly compiled program using orgID:resourceID key
+    policyKey := fmt.Sprintf("%d:%s", orgID, resourceID)
     e.policies[policyKey] = &PolicyProgram{
         Program:  prg,
         Mode:     mode,
-        PolicyID: tuple.ObjectID,
+        PolicyID: tuple.PrincipalID,
     }
     return nil
 }
