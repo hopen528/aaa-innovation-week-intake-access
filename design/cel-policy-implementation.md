@@ -147,71 +147,162 @@ DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} # Delete
 
 ---
 
-### Day 2: Data Plane Implementation
+### Day 2: Data Plane Implementation ✅ COMPLETED
 
-**Goal:** Build policy reader, CEL evaluator, integrate into authenticator-intake
+**Goal:** Build policy reader, CEL evaluator, export as standalone package
 
-#### 2.1 Update EdgeAuthResult (dd-go/model/api_key.go)
+**PR:** https://github.com/DataDog/dd-source/pull/351115
 
-Add `OrgUUID string` field (already available in ApiKeyContext).
+#### 2.1 Policy Evaluator Package (dd-source/domains/aaa/apps/zoltron/policyeval)
 
-#### 2.2 Policy Reader (dd-go/pkg/authdatastore)
-
-- Copy RestrictionPolicy codec and proto from dd-source
-- Create FRAMES reader wrapper for restriction policies
-
-#### 2.3 Policy Evaluator (dd-go/apps/authenticator-intake/pkg/policyeval)
+Implemented as a standalone Go package in dd-source that can be imported by dd-go.
 
 ```go
+// Package: go.ddbuild.io/dd-source/domains/aaa/apps/zoltron/policyeval
+
 type PolicyEvaluator struct {
     env          *cel.Env                    // CEL environment with K8s IP/CIDR libs
-    cache        map[string]*CachedPolicy    // Hash-based cache: "orgID:resourceID" → compiled program
-    policyReader authdatastore.PolicyReader
+    cache        map[string]*CachedPolicy    // Hash-based cache: "orgUUID:resourceID" → compiled
+    policyReader frames.Reader               // FRAMES reader for restriction policies
 }
 
-// CheckAccess evaluates policy with hash-based cache invalidation
-func (e *PolicyEvaluator) CheckAccess(orgID int32, orgUUID uuid.UUID, apiKeyUUID string, ctx *RequestContext) (*AccessDecision, error)
+// NewPolicyEvaluator creates evaluator with CEL environment and FRAMES reader
+func NewPolicyEvaluator(contextRootPath string) (*PolicyEvaluator, error)
+
+// WaitReady blocks until FRAMES snapshot is loaded
+func (e *PolicyEvaluator) WaitReady(ctx context.Context, timeout time.Duration) error
+
+// CheckAccess evaluates both org-wide and key-specific policies
+// Both must pass - org-wide is baseline, key-specific adds restrictions
+func (e *PolicyEvaluator) CheckAccess(ctx context.Context, orgUUID uuid.UUID, apiKeyUUID string, reqCtx *RequestContext) (*AccessDecision, error)
 ```
 
-**Cache strategy:**
-- SHA-256 hash of serialized proto as cache key
+#### 2.2 Policy Evaluation Logic
+
+```go
+func (e *PolicyEvaluator) CheckAccess(...) (*AccessDecision, error) {
+    // 1. Check org-wide policy first (orgUUID:*)
+    orgWideDecision, err := e.evaluatePolicy(ctx, orgUUID, "*", reqCtx)
+    
+    // 2. If org-wide blocks (enforced mode), return immediately
+    if orgWideDecision != nil && !orgWideDecision.Allowed && orgWideDecision.Mode == PolicyModeEnforced {
+        return orgWideDecision, nil
+    }
+    
+    // 3. Check key-specific policy (orgUUID:apiKeyUUID)
+    keyDecision, err := e.evaluatePolicy(ctx, orgUUID, apiKeyUUID, reqCtx)
+    if keyDecision != nil {
+        return keyDecision, nil
+    }
+    
+    // 4. Fall back to org-wide, or allow if no policies
+    if orgWideDecision != nil {
+        return orgWideDecision, nil
+    }
+    return &AccessDecision{Allowed: true, Reason: "no restriction policies configured"}, nil
+}
+```
+
+**Key behavior:** Both policies must pass. Org-wide restrictions cannot be bypassed by key-specific policies.
+
+#### 2.3 CEL Expression Parsing
+
+Reads from FRAMES proto and compiles CEL:
+
+```go
+func (e *PolicyEvaluator) compilePolicy(policy *framespb.RestrictionPolicyValue) (*CachedPolicy, error) {
+    // Find "access_policy" relation with "cel_expression" subject
+    for _, relation := range policy.GetRelations() {
+        if relation.GetRelation() != "access_policy" {
+            continue
+        }
+        for _, subject := range relation.GetSubjects() {
+            if subject.GetSubjectType() == "cel_expression" {
+                celExpr := subject.GetCondition()
+                mode := parseModeFromSubjectID(subject.GetSubjectId())  // "ip-policy-{mode}"
+                
+                // Compile with K8s CEL libraries
+                ast, _ := e.env.Compile(celExpr)
+                program, _ := e.env.Program(ast)
+                return &CachedPolicy{Program: program, Mode: mode}, nil
+            }
+        }
+    }
+}
+```
+
+#### 2.4 Cache Strategy
+
+- SHA-256 hash of serialized proto for cache invalidation
 - If hash matches → use cached program (~0.3μs)
 - If hash differs → recompile (~35μs one-time cost)
 
-#### 2.4 Integration in AuthN Handler
+#### 2.5 Types
 
 ```go
+type RequestContext struct {
+    SourceIP string
+    Product  string
+    Path     string
+}
+
+type AccessDecision struct {
+    Allowed        bool
+    Reason         string
+    PolicyID       string        // "ip-policy-enforced"
+    PolicyScope    string        // "*" or "key-uuid"
+    Mode           PolicyMode
+    WouldBlock     bool          // For dry_run mode
+    EvaluationTime time.Duration
+}
+
+type PolicyMode string
+const (
+    PolicyModeDisabled PolicyMode = "disabled"
+    PolicyModeDryRun   PolicyMode = "dry_run"
+    PolicyModeEnforced PolicyMode = "enforced"
+)
+```
+
+#### 2.6 File Structure
+
+```
+dd-source/domains/aaa/apps/zoltron/
+├── policyeval/
+│   ├── BUILD.bazel           # dd_go_package for export
+│   ├── evaluator.go          # PolicyEvaluator implementation
+│   ├── evaluator_test.go     # Comprehensive tests
+│   └── types.go              # Public types
+└── internal/frames/
+    ├── codec.go              # RestrictionPolicyCodec (existing)
+    └── proto/restriction_policy.proto
+```
+
+#### 2.7 Integration in dd-go (TODO)
+
+```go
+import "go.ddbuild.io/dd-source/domains/aaa/apps/zoltron/policyeval"
+
 func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
     authResult := s.credentialResolver.Resolve(ctx, req.APIKey)
+    orgUUID, _ := uuid.Parse(authResult.OrgUUID)
     
     decision, err := s.policyEvaluator.CheckAccess(
-        authResult.OrgID, 
-        authResult.OrgUUID, 
-        authResult.UUID, 
-        &RequestContext{SourceIP: req.ClientIP},
+        ctx,
+        orgUUID,
+        authResult.UUID,
+        &policyeval.RequestContext{SourceIP: req.ClientIP},
     )
     
+    if err != nil {
+        // Fail open
+        return nil
+    }
     if !decision.Allowed {
         return &ForbiddenError{StatusCode: 403, Message: decision.Reason}
     }
     return nil
 }
-```
-
-#### 2.5 File Structure
-
-```
-dd-go/
-├── model/api_key.go                           # Add OrgUUID field
-├── pkg/authdatastore/
-│   ├── restriction_policy_frames.go           # Codec
-│   ├── restriction_policy_context.go          # FRAMES reader
-│   └── proto/restriction_policy.proto
-└── apps/authenticator-intake/
-    ├── pkg/policyeval/
-    │   ├── evaluator.go                       # CEL evaluator
-    │   └── types.go                           # PolicyMode, AccessDecision
-    └── authzcheck/check.go                    # Integration
 ```
 
 ---
