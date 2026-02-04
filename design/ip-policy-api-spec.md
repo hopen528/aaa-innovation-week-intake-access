@@ -164,6 +164,61 @@ Deletes an IP policy.
 
 ---
 
+### Test IP Policy
+
+```
+POST /api/unstable/orgs/{org_uuid}/ip-policies/test
+```
+
+Tests an IP address against the current policies. Reads directly from FRAMES to verify policy propagation and CEL evaluation. Useful for testing policies before enforcement.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ip` | string | Yes | IP address to test (e.g., `"192.168.1.100"`) |
+| `resource_id` | string | No | API key UUID to test against, defaults to `"*"` (org-wide) |
+
+**Example Request:**
+
+```json
+{
+  "ip": "192.168.1.100",
+  "resource_id": "*"
+}
+```
+
+**Response:** `200 OK`
+
+```json
+{
+  "ip": "192.168.1.100",
+  "resource_id": "*",
+  "allowed": false,
+  "reason": "policy blocks access",
+  "policy_id": "ip-policy-enforced",
+  "policy_scope": "*",
+  "mode": "enforced",
+  "evaluation_time": "1.234µs"
+}
+```
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ip` | string | The IP address that was tested |
+| `resource_id` | string | The resource ID that was tested |
+| `allowed` | boolean | Whether the IP would be allowed |
+| `reason` | string | Human-readable explanation of the decision |
+| `policy_id` | string | ID of the policy that made the decision |
+| `policy_scope` | string | `"*"` for org-wide, or specific key UUID |
+| `mode` | string | Policy mode: `disabled`, `dry_run`, or `enforced` |
+| `would_block` | boolean | (dry_run only) Whether this would have blocked |
+| `evaluation_time` | string | Time taken to evaluate the policy |
+
+---
+
 ## Policy Modes
 
 | Mode | Evaluates | Blocks | Description |
@@ -237,6 +292,19 @@ curl -X PATCH "https://api.datadoghq.com/api/unstable/orgs/{org_uuid}/ip-policie
   -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"mode": "enforced"}'
+```
+
+### Test if an IP would be blocked
+
+```bash
+curl -X POST "https://api.datadoghq.com/api/unstable/orgs/{org_uuid}/ip-policies/test" \
+  -H "DD-API-KEY: ${DD_API_KEY}" \
+  -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ip": "192.168.1.100",
+    "resource_id": "*"
+  }'
 ```
 
 ---
