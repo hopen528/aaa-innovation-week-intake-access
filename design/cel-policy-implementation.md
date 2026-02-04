@@ -223,23 +223,60 @@ RestrictionPolicyKey {
 
 #### Frontend (web-ui: `erica.zhong/ACCESSINT-1112-ip-policies-ui`)
 
-- [x] New page at `/organization-settings/ip-policies`
-  - `PageIpPolicies.tsx` with title, info box, and table
-  - Added to org settings navigation and routes
-- [x] `IpPoliciesTable` component
-  - Displays resource ID, blocked/allowed CIDRs, and mode badge
-  - Edit and delete actions per row
-  - Mode badge colors: enforced (danger), dry_run (warning), disabled (default)
-- [x] `IpPolicyAddModal` for creating new policies
+**Main Page (`/organization-settings/ip-policies`):**
+- [x] `PageIpPolicies.tsx` - Main page with title, info box, audit trail link, and table
+- [x] Added to org settings navigation and routes
+
+**Table & List Components:**
+- [x] `IpPoliciesTable` - Full-featured table with:
+  - Checkbox selection for bulk operations
+  - Resource ID, blocked/allowed CIDRs, mode columns
+  - Edit and delete row actions
+  - Bulk mode change (dropdown + apply)
+  - Bulk delete selected policies
+  - Empty state with CTA
+- [x] `IpPoliciesEmptyState` - Empty state with icon and "Add IP Policy" button
+- [x] `IpPoliciesSkeleton` - Loading skeleton for table and card variants
+
+**Modal Components:**
+- [x] `IpPolicyAddModal` - Create new policies with:
   - Resource ID input (org-wide `*` or specific key ID)
-  - Blocked/allowed CIDRs input
-  - Mode selector (disabled/dry_run/enforced)
-- [x] `IpPolicyEditModal` for updating existing policies
-- [x] API hooks using react-query
-  - `useGetApiUnstableOrgsIpPolicies`
-  - `usePostApiUnstableOrgsIpPolicies`
-  - `useDeleteApiUnstableOrgsIpPoliciesId`
-- [x] Feature flag: `ip_policies_ui`
+  - `CidrInput` for blocked/allowed CIDRs with validation
+  - `ModeSelector` for mode selection
+  - `TestIpInput` to preview allow/block behavior
+- [x] `IpPolicyEditModal` - Update existing policies with:
+  - Same inputs as add modal
+  - `DryRunMetrics` placeholder for dry-run mode
+  - Audit trail link
+- [x] `DeletePolicyModal` - Confirmation modal with enforced mode warning
+
+**Reusable Components:**
+- [x] `ModeBadge` - Colored badge (enforced=danger, dry_run=warning, disabled=default)
+- [x] `ModeSelector` - RadioButtons with mode descriptions
+- [x] `CidrInput` - Multi-CIDR input with:
+  - Real-time CIDR validation
+  - IP range display (network/broadcast)
+  - Add/remove individual CIDRs
+- [x] `CidrList` - Display CIDRs with truncation and copy button
+- [x] `TestIpInput` - Test IP against policy rules with allow/block preview
+- [x] `DryRunMetrics` - Placeholder for dry-run metrics (24h stats)
+
+**API Key Integration:**
+- [x] `ApiKeyIpPolicies` - Embedded in ViewApiKeyModal with:
+  - Shows policy for specific API key
+  - Edit button opens `IpPolicyEditModal`
+  - Direct delete with loading state (no confirmation modal)
+  - Empty state with "Add IP Policy" button
+
+**API Hooks (`hooks/use-ip-policies-api.ts`):**
+- [x] `useGetApiUnstableOrgsIpPolicies` - List/filter policies
+- [x] `usePostApiUnstableOrgsIpPolicies` - Create policy
+- [x] `usePatchApiUnstableOrgsIpPoliciesId` - Update policy
+- [x] `useDeleteApiUnstableOrgsIpPoliciesId` - Delete policy
+- [x] `invalidateApiUnstableOrgsIpPolicies` - Cache invalidation
+
+**Utilities:**
+- [x] `utils/cidr-utils.ts` - CIDR validation, IP matching, range calculation
 
 **Deliverable:** End-to-end IP policy management (API + UI + FRAMES) ✅
 
