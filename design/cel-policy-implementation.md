@@ -312,10 +312,17 @@ if exists && cached.Hash == policyHash {
 - Simplifies mental model: "most specific policy wins"
 - Org-wide acts as default when no key-specific policy exists
 
-**3. Fail-Open Behavior:**
-- On evaluation errors, requests are allowed
-- Prioritizes availability over security
-- All errors are logged for monitoring
+**3. Fail-Open Behavior (Production-Ready):**
+- **Non-blocking initialization**: Service starts even if PolicyEvaluator fails to create or FRAMES is unavailable
+- **Graceful degradation**: Runs without policy evaluation if `policyEvaluator == nil`
+- **Error handling at multiple levels**:
+  - Initialization failures → Log warning, set evaluator to nil, continue service
+  - FRAMES readiness timeout → Log error in background goroutine, service continues
+  - Policy evaluation errors → Log error, allow request (fail-open)
+  - CEL compilation/evaluation failures → Return `Allowed: true` with error reason
+  - Invalid CEL results → Return `Allowed: true` with diagnostic reason
+- **Comprehensive logging**: All failures logged for monitoring and alerting
+- **No single point of failure**: Prioritizes availability over security enforcement
 
 **4. CEL Syntax:**
 - Uses Kubernetes library syntax: `cidr('192.168.1.0/24').containsIP(ip(request.source_ip))`
