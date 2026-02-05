@@ -336,13 +336,12 @@ if exists && cached.Hash == policyHash {
 
 ---
 
-### Day 3: Staging Deployment & Validation
+### Day 3: UI Polish & Test Endpoint ✅ COMPLETED
 
-- [ ] Deploy to staging with dry_run policies
-- [ ] Verify FRAMES propagation (~5s)
-- [ ] Test policy updates and mode transitions
-- [ ] Validate performance under load
-- [ ] Demo preparation
+- [x] Fixed TypeScript/DRUIDS component issues
+- [x] Integrated test IP endpoint (`POST /ip-policies/test`)
+- [x] Add/Edit modals use local testing, read-only view uses API testing
+- [x] UX polish (smaller modals, loading states)
 
 ---
 
