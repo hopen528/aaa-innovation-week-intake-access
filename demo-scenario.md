@@ -2,11 +2,13 @@
 
 ## Demo Setup Requirements
 
-### Test IPs to Use
-- **Your IP**: `YOUR_ACTUAL_IP` (allowed - for live demo)
-- **Blocked IP 1**: `10.0.0.5` (internal range)
-- **Blocked IP 2**: `192.168.1.100` (private range)
-- **Allowed IP**: `8.8.8.8` (Google DNS - safe example)
+### Test IPs Setup (Physical IPs Required)
+- **Demo Machine IP**: Your actual laptop/desktop IP
+- **Cloud VM 1**: Spin up EC2/GCP instance (for "blocked" IP)
+- **Cloud VM 2**: Another instance in different region (for "allowed" IP)
+- **VPN/Proxy**: Optional - to simulate office IP
+
+**Note**: Envoy sets `x-client-ip` from actual connection - can't be spoofed by client
 
 ### Test API Keys (Why We Need 2 Keys)
 1. **Key A**: `demo-key-normal` - No key-specific policy (affected by org-wide policy)
@@ -36,12 +38,16 @@
 **Goal**: Show current state - all traffic allowed
 
 1. **Show dashboard** - All requests returning 200
-2. **Send test traffic** with Key A from various IPs:
+2. **Send test traffic** with Key A from various locations:
    ```bash
-   # All succeed (200)
-   curl -H "DD-API-KEY: demo-key-unrestricted" -H "x-client-ip: 10.0.0.5"
-   curl -H "DD-API-KEY: demo-key-unrestricted" -H "x-client-ip: 192.168.1.100"
-   curl -H "DD-API-KEY: demo-key-unrestricted" -H "x-client-ip: 8.8.8.8"
+   # From demo laptop (200)
+   curl -H "DD-API-KEY: demo-key-normal" $INTAKE_URL -d '{"message":"from laptop"}'
+
+   # SSH to VM1 and run (200)
+   ssh vm1 "curl -H 'DD-API-KEY: demo-key-normal' $INTAKE_URL -d '{\"message\":\"from VM1\"}'"
+
+   # SSH to VM2 and run (200)
+   ssh vm2 "curl -H 'DD-API-KEY: demo-key-normal' $INTAKE_URL -d '{\"message\":\"from VM2\"}'"
    ```
 3. **Point out problem**: "Any IP can send data - potential security risk"
 
@@ -123,43 +129,69 @@
 
 ---
 
-## Demo Script Commands
+## Demo Setup Script
 
 ```bash
-# Prep: Set up variables
-ORG_ID="test-org-id"
-KEY_A="demo-key-normal"    # No key-specific policy
-KEY_B="demo-key-vip"       # Will get key-specific allow policy
-INTAKE_URL="https://logs.browser-intake-datad0g.com/api/v2/logs"
+# 1. Provision test infrastructure
+# Create 2 EC2 instances in different regions
+aws ec2 run-instances --image-id ami-xxx --instance-type t2.micro --key-name demo-key --region us-east-1
+aws ec2 run-instances --image-id ami-xxx --instance-type t2.micro --key-name demo-key --region eu-west-1
 
-# Function to test an IP
-test_ip() {
-  local key=$1
-  local ip=$2
-  local label=$3
-  echo "Testing $label (IP: $ip, Key: $key)"
-  curl -X POST $INTAKE_URL \
-    -H "DD-API-KEY: $key" \
-    -H "x-client-ip: $ip" \
-    -H "Content-Type: application/json" \
-    -d '[{"message":"Test from IP restriction demo","service":"demo"}]' \
-    -w "\nStatus: %{http_code}\n"
-}
+# Get their public IPs
+VM1_IP=$(aws ec2 describe-instances --region us-east-1 --query 'Reservations[0].Instances[0].PublicIpAddress')
+VM2_IP=$(aws ec2 describe-instances --region eu-west-1 --query 'Reservations[0].Instances[0].PublicIpAddress')
 
-# Act 1: Baseline
-test_ip $KEY_A "10.0.0.5" "Internal IP"
-test_ip $KEY_A "8.8.8.8" "External IP"
+# 2. Set up test script on each VM
+cat > test_intake.sh << 'EOF'
+#!/bin/bash
+KEY=$1
+MESSAGE=$2
+curl -X POST https://logs.browser-intake-datad0g.com/api/v2/logs \
+  -H "DD-API-KEY: $KEY" \
+  -H "Content-Type: application/json" \
+  -d "[{\"message\":\"$MESSAGE\",\"service\":\"demo\"}]" \
+  -w "\nStatus: %{http_code}\n"
+EOF
 
-# Act 2: After dry-run (same commands, different results in logs)
+# Copy script to VMs
+scp test_intake.sh ec2-user@$VM1_IP:~/
+scp test_intake.sh ec2-user@$VM2_IP:~/
 
-# Act 3: After enforced
-test_ip $KEY_A "10.0.0.5" "Internal IP - Should block"
-test_ip $KEY_A "8.8.8.8" "External IP - Should allow"
+# 3. Demo execution
+KEY_A="demo-key-normal"
+KEY_B="demo-key-vip"
 
-# Act 4: Key-specific override (org policy still blocking)
-test_ip $KEY_A "10.0.0.5" "Key A - No key policy, blocked by org"
-test_ip $KEY_B "10.0.0.5" "Key B - Has allow policy, overrides org block"
+# Test from laptop
+./test_intake.sh $KEY_A "Test from laptop"
+
+# Test from VM1 (will be blocked IP)
+ssh ec2-user@$VM1_IP "./test_intake.sh $KEY_A 'Test from VM1'"
+
+# Test from VM2 (will be allowed IP)
+ssh ec2-user@$VM2_IP "./test_intake.sh $KEY_A 'Test from VM2'"
 ```
+
+---
+
+## Alternative: Simpler Demo Approach
+
+If setting up multiple VMs is too complex, consider:
+
+### Option 1: Use Different Network Locations
+- **Your laptop**: On office WiFi (IP: X.X.X.X)
+- **Your phone hotspot**: Switch WiFi to phone (different IP)
+- **Coffee shop WiFi**: Pre-record from different location
+- **VPN connection**: Toggle VPN on/off for different IPs
+
+### Option 2: Pre-recorded Results
+- Record videos/screenshots from different IPs beforehand
+- Show live dashboard with historical data
+- Focus on policy configuration UI during live demo
+
+### Option 3: Use Test Endpoint
+- Use the `/ip-policies/test` endpoint with spoofed IPs
+- Explain that production uses actual connection IP
+- Show the "would block/allow" results in UI
 
 ---
 
