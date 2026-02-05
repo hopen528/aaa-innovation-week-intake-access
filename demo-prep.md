@@ -2,7 +2,7 @@
 
 ## Demo Flow
 
-1. **Show the problem** - API keys have no IP restrictions today
+1. **Show the problem** - Intake traffic has no IP restrictions today
 2. **Create org-wide policy** - Block a CIDR range in dry_run mode
 3. **Test IP** - Show test feature against FRAMES
 4. **Promote to enforced** - Change mode
@@ -17,13 +17,14 @@
   - `/organization-settings/ip-policies`
   - `/organization-settings/api-keys` (to show integration)
   - Audit trail filtered to ip_policy events
+  - CEL policy dashboard: https://ddstaging.datadoghq.com/dashboard/2rv-wuu-vhj
 
 ## Talking Points
 
 - **Performance**: 0.3μs evaluation, 600x under latency budget
-- **Flexibility**: CEL expressions can extend to country, time, user-agent later
+- **Flexibility**: CEL expressions can extend to scoped API key, country, time, user-agent later
 - **Safe rollout**: disabled → dry_run → enforced
-- **No new infra**: Reuses Zoltron + FRAMES
+- **No new infra**: Reuses Zoltron + FRAMES + intake sidecar
 
 ## Potential Questions
 
