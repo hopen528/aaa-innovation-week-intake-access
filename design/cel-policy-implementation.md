@@ -147,23 +147,28 @@ DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} # Delete
 
 ---
 
-### Day 2: Data Plane Implementation ✅ COMPLETED
+### Day 2: Data Plane Implementation 🚧 IN PROGRESS
 
-**Goal:** Build policy reader, CEL evaluator, export as standalone package
+**Goal:** Integrate CEL policy evaluator into authenticator-intake service
 
-**PR:** https://github.com/DataDog/dd-source/pull/351115
+**Implementation approach:** Self-contained in dd-go to avoid cross-repo dependency complexity
 
-#### 2.1 Policy Evaluator Package (dd-source/domains/aaa/apps/zoltron/policyeval)
+**PRs:**
+- dd-go: https://github.com/DataDog/dd-go/pull/220294 (DRAFT - In Progress)
+- dd-source (control plane): https://github.com/DataDog/dd-source/pull/351115 (Control plane endpoints)
 
-Implemented as a standalone Go package in dd-source that can be imported by dd-go.
+#### 2.1 Policy Evaluator Package (dd-go/apps/authenticator-intake/policyeval)
+
+Implemented directly in dd-go using existing FRAMES reader infrastructure from authdatastore.
 
 ```go
-// Package: go.ddbuild.io/dd-source/domains/aaa/apps/zoltron/policyeval
+// Package: github.com/DataDog/dd-go/apps/authenticator-intake/policyeval
 
 type PolicyEvaluator struct {
-    env          *cel.Env                    // CEL environment with K8s IP/CIDR libs
-    cache        map[string]*CachedPolicy    // Hash-based cache: "orgUUID:resourceID" → compiled
-    policyReader frames.Reader               // FRAMES reader for restriction policies
+    env          *cel.Env                              // CEL environment with K8s IP/CIDR libs
+    cache        map[string]*CachedPolicy              // Hash-based cache: "orgUUID:resourceID" → compiled
+    cacheMu      sync.RWMutex                          // Protects cache map
+    policyReader authdatastore.RestrictionPolicyReader // FRAMES reader for restriction policies
 }
 
 // NewPolicyEvaluator creates evaluator with CEL environment and FRAMES reader
@@ -172,42 +177,140 @@ func NewPolicyEvaluator(contextRootPath string) (*PolicyEvaluator, error)
 // WaitReady blocks until FRAMES snapshot is loaded
 func (e *PolicyEvaluator) WaitReady(ctx context.Context, timeout time.Duration) error
 
-// CheckAccess evaluates both org-wide and key-specific policies
-// Both must pass - org-wide is baseline, key-specific adds restrictions
+// CheckAccess evaluates restriction policies for a given org and API key
+// Key-specific policies always take precedence over org-wide policies
 func (e *PolicyEvaluator) CheckAccess(ctx context.Context, orgUUID uuid.UUID, apiKeyUUID string, reqCtx *RequestContext) (*AccessDecision, error)
 ```
 
-#### 2.2 Policy Evaluation Logic
+#### 2.2 Policy Evaluation Logic (Actual Implementation)
 
 ```go
 func (e *PolicyEvaluator) CheckAccess(...) (*AccessDecision, error) {
-    // 1. Check org-wide policy first (orgUUID:*)
-    orgWideDecision, err := e.evaluatePolicy(ctx, orgUUID, "*", reqCtx)
-    
-    // 2. If org-wide blocks (enforced mode), return immediately
-    if orgWideDecision != nil && !orgWideDecision.Allowed && orgWideDecision.Mode == PolicyModeEnforced {
-        return orgWideDecision, nil
-    }
-    
-    // 3. Check key-specific policy (orgUUID:apiKeyUUID)
+    // 1. Check key-specific policy first (orgUUID:apiKeyUUID) - it takes precedence
     keyDecision, err := e.evaluatePolicy(ctx, orgUUID, apiKeyUUID, reqCtx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to evaluate key-specific policy: %w", err)
+    }
+
+    // 2. If key-specific policy exists, use it (overrides org-wide)
     if keyDecision != nil {
         return keyDecision, nil
     }
-    
-    // 4. Fall back to org-wide, or allow if no policies
+
+    // 3. Fall back to org-wide policy (orgUUID:*)
+    orgWideDecision, err := e.evaluatePolicy(ctx, orgUUID, "*", reqCtx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to evaluate org-wide policy: %w", err)
+    }
+
     if orgWideDecision != nil {
         return orgWideDecision, nil
     }
-    return &AccessDecision{Allowed: true, Reason: "no restriction policies configured"}, nil
+
+    // 4. No policies found - allow by default
+    return &AccessDecision{
+        Allowed: true,
+        Reason:  "no restriction policies configured",
+    }, nil
 }
 ```
 
-**Key behavior:** Both policies must pass. Org-wide restrictions cannot be bypassed by key-specific policies.
+**Key behavior:** Key-specific policies completely override org-wide policies when present.
 
-#### 2.3 CEL Expression Parsing
+#### 2.3 Integration in authenticator-intake (dd-go/apps/authenticator-intake)
 
-Reads from FRAMES proto and compiles CEL:
+The policy evaluator is integrated into the authenticator-intake service at the authorization check point:
+
+```go
+// apps/authenticator-intake/authzcheck/check.go
+func Check(ctx context.Context, req *auth.CheckRequest, resolver *resolver.CredentialResolver, policyEvaluator *policyeval.PolicyEvaluator) (*auth.CheckResponse, error) {
+    // 1. Extract and resolve API key
+    apiKey, err := ExtractAPIKey(ctx, req, u)
+    info := resolver.Resolve(ctx, apiKey)
+
+    // 2. Add extensive observability logging
+    observability_accumulator.AddBothLogAndMetricField(ctx, "path", sanitizedPath)
+    observability_accumulator.AddBothLogAndMetricField(ctx, "product", product.String())
+    observability_accumulator.AddLogField(ctx, log.String("client_ip", ip))
+    observability_accumulator.AddLogField(ctx, log.Int32("org_id", info.OrgID))
+    observability_accumulator.AddLogField(ctx, log.String("org_uuid", info.OrgUUID))
+    observability_accumulator.AddLogField(ctx, log.String("credential_type", info.Type.String()))
+    observability_accumulator.AddLogField(ctx, log.String("credential_uuid", info.UUID))
+
+    // 3. Evaluate IP-based restriction policies if authenticated
+    if info.Status == model.AuthenticatedAPIKey && policyEvaluator != nil && info.OrgUUID != "" {
+        orgUUID, err := uuid.Parse(info.OrgUUID)
+        if err == nil {
+            // Extract source IP from x-client-ip header (set by Envoy from service-discovery-platform)
+            sourceIP := httpReq.GetHeaders()["x-client-ip"]
+
+            reqCtx := &policyeval.RequestContext{
+                SourceIP: sourceIP,
+                Product:  product.String(),
+                Path:     path,
+            }
+
+            decision, err := policyEvaluator.CheckAccess(ctx, orgUUID, info.UUID, reqCtx)
+            if err != nil {
+                // Fail open - log error but allow request
+                log.Error("Policy evaluation error", err)
+            } else if decision != nil {
+                // Log comprehensive policy evaluation metrics
+                log.Info("Request evaluated by restriction policy",
+                    log.Bool("decision", decision.Allowed),
+                    log.String("policy_id", decision.PolicyID),
+                    log.String("policy_scope", decision.PolicyScope),
+                    log.String("mode", string(decision.Mode)),
+                    log.String("reason", decision.Reason),
+                    log.Int64("eval_time_us", decision.EvaluationTime.Microseconds()))
+
+                if !decision.Allowed {
+                    // Policy denies the request
+                    info.Status = model.UnauthorizedAPIKey
+                    statusCode = httpStatusCode(req, &info)
+                    return generateResponse(&info, statusCode)
+                }
+            }
+        }
+    }
+
+    // Log all incoming request details for monitoring
+    log.Info("Incoming request details", observability_accumulator.GetLogFields(ctx)...)
+
+    return generateResponse(&info, envoy_type.StatusCode_OK)
+}
+```
+
+#### 2.4 PolicyEvaluator Initialization
+
+```go
+// apps/authenticator-intake/server/grpc_listener.go
+func mustGRPCListener(cfg config.ExtendedConfig, r *resolver.CredentialResolver) *grpcListener {
+    // Initialize PolicyEvaluator for IP-based restriction policies
+    contextRootPath := cfg.GetDefault("dd.authenticator.policy", "context_root_path", "")
+    policyEvaluator, err := policyeval.NewPolicyEvaluator(contextRootPath)
+    if err != nil {
+        log.Warn("Failed to create policy evaluator, policy evaluation will be disabled", err)
+        policyEvaluator = nil
+    } else {
+        // Wait for FRAMES to be ready in background
+        go func() {
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            defer cancel()
+            if err := policyEvaluator.WaitReady(ctx, 30*time.Second); err != nil {
+                log.Error("Policy evaluator failed to become ready", err)
+            }
+        }()
+    }
+
+    gl := &grpcListener{srv, serviceName, listener, r, nil, policyEvaluator}
+    // ...
+}
+```
+
+#### 2.5 CEL Expression Compilation
+
+Reads from FRAMES proto and compiles CEL with correct Kubernetes library syntax:
 
 ```go
 func (e *PolicyEvaluator) compilePolicy(policy *framespb.RestrictionPolicyValue) (*CachedPolicy, error) {
@@ -219,25 +322,41 @@ func (e *PolicyEvaluator) compilePolicy(policy *framespb.RestrictionPolicyValue)
         for _, subject := range relation.GetSubjects() {
             if subject.GetSubjectType() == "cel_expression" {
                 celExpr := subject.GetCondition()
-                mode := parseModeFromSubjectID(subject.GetSubjectId())  // "ip-policy-{mode}"
-                
+                // Example CEL: cidr('192.168.1.0/24').containsIP(ip(request.source_ip))
+
+                // Parse mode from subject_id: "ip-policy-{enforced|dryrun|disabled}"
+                mode := parseModeFromSubjectID(subject.GetSubjectId())
+
                 // Compile with K8s CEL libraries
-                ast, _ := e.env.Compile(celExpr)
-                program, _ := e.env.Program(ast)
-                return &CachedPolicy{Program: program, Mode: mode}, nil
+                ast, issues := e.env.Compile(celExpr)
+                if issues != nil && issues.Err() != nil {
+                    return nil, fmt.Errorf("failed to compile CEL expression: %w", issues.Err())
+                }
+
+                program, err := e.env.Program(ast)
+                if err != nil {
+                    return nil, fmt.Errorf("failed to create CEL program: %w", err)
+                }
+
+                return &CachedPolicy{
+                    Program:  program,
+                    Mode:     mode,
+                    PolicyID: subject.GetSubjectId(),
+                }, nil
             }
         }
     }
 }
 ```
 
-#### 2.4 Cache Strategy
+#### 2.6 Cache Strategy
 
 - SHA-256 hash of serialized proto for cache invalidation
 - If hash matches → use cached program (~0.3μs)
 - If hash differs → recompile (~35μs one-time cost)
+- Cache key: `"orgUUID:resourceID"` (e.g., `"550e8400-e29b-41d4-a716-446655440000:*"`)
 
-#### 2.5 Types
+#### 2.7 Types
 
 ```go
 type RequestContext struct {
@@ -264,46 +383,101 @@ const (
 )
 ```
 
-#### 2.6 File Structure
+#### 2.8 File Structure
 
 ```
-dd-source/domains/aaa/apps/zoltron/
-├── policyeval/
-│   ├── BUILD.bazel           # dd_go_package for export
-│   ├── evaluator.go          # PolicyEvaluator implementation
-│   ├── evaluator_test.go     # Comprehensive tests
-│   └── types.go              # Public types
-└── internal/frames/
-    ├── codec.go              # RestrictionPolicyCodec (existing)
-    └── proto/restriction_policy.proto
+dd-go/
+├── apps/authenticator-intake/
+│   ├── policyeval/
+│   │   ├── evaluator.go          # PolicyEvaluator implementation (335 lines)
+│   │   ├── evaluator_test.go     # Unit tests with mock FRAMES reader (550 lines)
+│   │   └── types.go              # Public types (RequestContext, AccessDecision, etc.)
+│   ├── authzcheck/
+│   │   ├── check.go              # Integration point for policy evaluation (+62 lines)
+│   │   └── check_policy_test.go  # Integration tests (260 lines)
+│   ├── server/
+│   │   └── grpc_listener.go      # PolicyEvaluator initialization (+30 lines)
+│   └── shadow/
+│       └── grpc_listener.go      # Shadow mode support (+42 lines)
+├── pkg/authdatastore/
+│   ├── restriction_policy_reader.go  # FRAMES reader for restriction policies (311 lines)
+│   ├── restriction_policy_codec.go   # Key serialization for FRAMES (146 lines)
+│   └── proto/
+│       ├── restriction_policy.proto  # Proto definitions (27 lines)
+│       └── restriction_policy.pb.go  # Generated proto for policy data (260 lines)
+├── resolver/
+│   └── context_resolver.go       # Updated to populate OrgUUID (+1 line)
+└── model/
+    └── api_key.go                # Added OrgUUID field to EdgeAuthResult (+1 line)
 ```
 
-#### 2.7 Integration in dd-go (TODO)
+**Total additions:** 2,072 lines
+**Total deletions:** 12 lines
 
-```go
-import "go.ddbuild.io/dd-source/domains/aaa/apps/zoltron/policyeval"
+#### 2.9 Testing Strategy
 
-func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
-    authResult := s.credentialResolver.Resolve(ctx, req.APIKey)
-    orgUUID, _ := uuid.Parse(authResult.OrgUUID)
-    
-    decision, err := s.policyEvaluator.CheckAccess(
-        ctx,
-        orgUUID,
-        authResult.UUID,
-        &policyeval.RequestContext{SourceIP: req.ClientIP},
-    )
-    
-    if err != nil {
-        // Fail open
-        return nil
-    }
-    if !decision.Allowed {
-        return &ForbiddenError{StatusCode: 403, Message: decision.Reason}
-    }
-    return nil
-}
-```
+**Unit Tests (policyeval/evaluator_test.go - 13 test cases):**
+- `TestPolicyEvaluator_IPAllowlist`: Tests IP allowlist with Kubernetes CEL syntax
+- `TestPolicyEvaluator_IPBlocklist`: Tests IP blocklist functionality
+- `TestPolicyEvaluator_DryRunMode`: Tests dry-run mode behavior
+- `TestPolicyEvaluator_MultipleIPRanges`: Tests complex policies with multiple CIDRs
+- `TestPolicyEvaluator_PolicyPrecedence`: Tests key-specific vs org-wide precedence
+- `TestPolicyEvaluator_OrgWidePolicy`: Tests org-wide policy application
+- `TestPolicyEvaluator_NoPolicy`: Tests default allow when no policy exists
+- `TestPolicyEvaluator_PolicyCaching`: Tests hash-based cache invalidation
+- `TestPolicyEvaluator_DisabledMode`: Tests disabled policy mode
+- `TestPolicyEvaluator_InvalidCEL`: Tests error handling for invalid CEL
+- `TestPolicyEvaluator_ComplexPolicy`: Tests product-scoped policies
+- `TestPolicyEvaluator_EmptySourceIP`: Tests empty IP handling
+- `TestPolicyEvaluator_InvalidIP`: Tests invalid IP format handling
+
+**Integration Tests (authzcheck/check_policy_test.go - 7 test cases):**
+- `TestGenerateResponse_Unauthorized`: Tests 403 response generation
+- `TestGenerateResponse_Authenticated`: Tests 200 response with headers
+- `TestGenerateResponse_MissingAPIKey`: Tests missing API key handling
+- `TestPolicyIntegration_BlockedByPolicy`: Tests policy blocking flow
+- `TestPolicyIntegration_AllowedByPolicy`: Tests policy allowing flow
+- `TestExtractAPIKey_FromHeader`: Tests API key extraction
+- `TestSanitizePathForMetrics`: Tests path sanitization logic
+
+All tests use mock FRAMES reader to avoid external dependencies. Test coverage demonstrates comprehensive validation of all policy evaluation scenarios.
+
+#### 2.10 Key Implementation Decisions
+
+**1. Self-Contained in dd-go:**
+- Avoided cross-repo dependency complexity with dd-source
+- Cherry-picked FRAMES reader from existing PR (#220700)
+- All code lives in dd-go for easier deployment and iteration
+
+**2. Policy Precedence Model:**
+- Key-specific policies completely override org-wide when present
+- Simplifies mental model: "most specific policy wins"
+- Org-wide acts as default when no key-specific policy exists
+
+**3. Fail-Open Behavior:**
+- On evaluation errors, requests are allowed
+- Prioritizes availability over security
+- All errors are logged for monitoring
+
+**4. CEL Syntax:**
+- Uses Kubernetes library syntax: `cidr('192.168.1.0/24').containsIP(ip(request.source_ip))`
+- Consistent with industry standards
+- Supports complex expressions with AND/OR logic
+
+**5. Caching Strategy:**
+- SHA-256 hash-based cache invalidation
+- Compiled programs cached indefinitely until policy changes
+- ~0.3μs cached evaluation vs ~35μs compilation
+
+**6. Observability Integration:**
+- Comprehensive logging with `observability_accumulator`
+- Both log and metric fields tracked for all requests
+- Detailed policy evaluation metrics including decision, mode, and evaluation time
+
+**7. Shadow Mode Support:**
+- Implemented shadow mode in `shadow/grpc_listener.go`
+- Allows testing policy evaluation without affecting traffic
+- Logs decisions without blocking requests
 
 ---
 
