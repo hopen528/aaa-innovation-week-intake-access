@@ -307,49 +307,12 @@ func (s *AuthNSidecar) ValidateIntakeRequest(req *IntakeRequest) error {
 
 ---
 
-### Day 3: UI Polish & Test Endpoint Integration ✅ COMPLETED
+### Day 3: UI Polish & Test Endpoint ✅ COMPLETED
 
-**Goal:** Fix UI issues, integrate test IP endpoint, polish UX
-
-#### 3.1 TypeScript Fixes (web-ui PR)
-
-Fixed DRUIDS component API mismatches:
-- [x] Icons: Removed unsupported `color` prop
-- [x] `Panel`: Changed `level` → `variant`
-- [x] `Flex`: Changed `justifyContent` → `justify`
-- [x] `RadioButtons`: Changed `selectedOption` → `value`, `direction="horizontal"` → `"row"`
-- [x] `ConfirmationModal`: Changed children → `message` prop
-- [x] `Spacing`: Wrapped string children in `<Text>` components
-- [x] `Table`: Fixed `emptyState` to use `TableEmptyStateProps` format
-- [x] Added missing imports (Text, PlusIcon)
-
-#### 3.2 State Management Fix
-
-- [x] Fixed `policyDeleted` flag not resetting after creating new policy
-  - Added `useEffect` to reset flag when `keyPolicies.length > 0`
-
-#### 3.3 Test IP Endpoint Integration
-
-**Backend endpoint:** `POST /api/unstable/orgs/{org_uuid}/ip-policies/test`
-
-- [x] Created `api-unstable-orgs-ip-policies-test.post.ts` in `@api/core-access`
-- [x] Added `useTestIpPolicy` hook wrapper
-- [x] Updated `TestIpInput` to support both modes:
-  - **API mode** (`resourceId` prop): Tests against saved policy in FRAMES
-  - **Local mode** (`blockedCidrs`/`allowedCidrs` props): Tests unsaved changes
-
-**Testing strategy:**
-| Location | Mode | Why |
-|----------|------|-----|
-| Add Modal | Local | Policy doesn't exist yet |
-| Edit Modal | Local | Tests unsaved edits |
-| ApiKeyIpPolicies card | API | Tests actual deployed policy |
-
-#### 3.4 UX Improvements
-
-- [x] Reduced modal size from `lg` → `md`
-- [x] Added evaluation time display in test results
-- [x] Added loading state to test button
+- [x] Fixed TypeScript/DRUIDS component issues
+- [x] Integrated test IP endpoint (`POST /ip-policies/test`)
+- [x] Add/Edit modals use local testing, read-only view uses API testing
+- [x] UX polish (smaller modals, loading states)
 
 ---
 
