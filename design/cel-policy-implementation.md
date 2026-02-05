@@ -157,42 +157,150 @@ DELETE /api/unstable/orgs/{org_uuid}/ip-policies/{resource_id} # Delete
 - dd-go: https://github.com/DataDog/dd-go/pull/220294 (DRAFT - Innovation Week demo, will remain draft)
 - dd-source: https://github.com/DataDog/dd-source/pull/351115 (Future home of evaluator package for production)
 
-#### 2.1 Core Components
+#### 2.1 PolicyEvaluator Package Design
 
-**PolicyEvaluator Package (`policyeval/`):**
-- CEL environment with Kubernetes IP/CIDR libraries for expression evaluation
-- Hash-based caching of compiled CEL programs for performance
-- FRAMES integration via authdatastore for reading restriction policies
-- Supports org-wide (`*`) and key-specific policies with proper precedence
+The core evaluator uses CEL with Kubernetes libraries for IP/CIDR matching:
 
-**Key Design:** Key-specific policies completely override org-wide policies when present, simplifying the mental model.
+```go
+// Package: go.ddbuild.io/dd-source/domains/aaa/apps/zoltron/policyeval
 
-#### 2.2 Integration Points
+type PolicyEvaluator struct {
+    env          *cel.Env         // CEL environment with K8s IP/CIDR libs
+    cache        map[string]*CachedPolicy  // Hash-based cache by "orgUUID:resourceID"
+    cacheMu      sync.RWMutex
+    policyReader frames.Reader    // FRAMES reader for restriction policies
+}
 
-**Authorization Check (`authzcheck/check.go`):**
-- Integrated after API key authentication succeeds
-- Extracts source IP from `x-client-ip` header (set by Envoy)
-- Evaluates policies with fail-open behavior for availability
-- Returns 403 Forbidden when policy denies access
+// CheckAccess evaluates policies with key-specific taking precedence over org-wide
+func (e *PolicyEvaluator) CheckAccess(ctx context.Context, orgUUID uuid.UUID, apiKeyUUID string, reqCtx *RequestContext) (*AccessDecision, error) {
+    // 1. Check key-specific policy first (takes precedence)
+    keyDecision, err := e.evaluatePolicy(ctx, orgUUID, apiKeyUUID, reqCtx)
+    if keyDecision != nil {
+        return keyDecision, nil  // Key-specific overrides org-wide
+    }
 
-**Service Initialization:**
-- PolicyEvaluator initialized on startup with FRAMES reader
-- Waits for FRAMES snapshot in background (30s timeout)
-- Graceful degradation if evaluator fails to initialize
+    // 2. Fall back to org-wide policy
+    orgWideDecision, err := e.evaluatePolicy(ctx, orgUUID, "*", reqCtx)
+    if orgWideDecision != nil {
+        return orgWideDecision, nil
+    }
 
-#### 2.3 File Structure
-
-```
-dd-go/
-├── apps/authenticator-intake/
-│   ├── policyeval/           # CEL policy evaluator
-│   ├── authzcheck/           # Integration point
-│   └── shadow/               # Shadow mode support
-├── pkg/authdatastore/        # FRAMES reader for policies
-└── model/                    # Added OrgUUID field
+    // 3. No policies - allow by default
+    return &AccessDecision{Allowed: true, Reason: "no restriction policies"}, nil
+}
 ```
 
-#### 2.4 Key Implementation Decisions
+**Key Design Decision:** Key-specific policies completely override org-wide policies when present, not additive. This simplifies the mental model: "most specific wins".
+
+#### 2.2 Integration with Authenticator-Intake
+
+Policy evaluation happens **after successful authentication**, using the resolved org and API key UUIDs:
+
+```go
+// authzcheck/check.go
+func Check(ctx context.Context, req *auth.CheckRequest, resolver *resolver.CredentialResolver,
+           policyEvaluator *policyeval.PolicyEvaluator) (*auth.CheckResponse, error) {
+
+    // 1. Extract and authenticate API key
+    apiKey, err := ExtractAPIKey(ctx, req, u)
+    info := resolver.Resolve(ctx, apiKey)  // Returns OrgUUID, UUID, Status
+
+    // 2. Policy evaluation ONLY after successful authentication
+    if info.Status == model.AuthenticatedAPIKey && policyEvaluator != nil && info.OrgUUID != "" {
+        orgUUID, _ := uuid.Parse(info.OrgUUID)
+
+        // Build request context with IP from x-client-ip header
+        reqCtx := &policyeval.RequestContext{
+            SourceIP: httpReq.GetHeaders()["x-client-ip"],
+            Product:  product.String(),
+            Path:     path,
+        }
+
+        // Evaluate with org and key UUIDs from authentication
+        decision, err := policyEvaluator.CheckAccess(ctx, orgUUID, info.UUID, reqCtx)
+        if err != nil {
+            // FAIL OPEN - log error but allow request
+            log.Error("Policy evaluation error", err)
+        } else if decision != nil && !decision.Allowed {
+            // Policy blocks - return 403
+            info.Status = model.UnauthorizedAPIKey
+            return generateResponse(&info, envoy_type.StatusCode_Forbidden)
+        }
+    }
+
+    // Continue with normal response
+}
+```
+
+**Critical Design Points:**
+- Policy evaluation **requires** successful authentication first (needs org/key UUIDs)
+- Source IP extracted from `x-client-ip` header (set by Envoy)
+- **Fail-open** on errors to maintain availability
+- Returns same 403 as auth failures to avoid information leakage
+
+#### 2.3 CEL Expression and Policy Modes
+
+Policies stored in FRAMES use Kubernetes CEL syntax and encode mode in `principal_id`:
+
+```go
+// From FRAMES proto
+Subject {
+    SubjectType: "cel_expression"
+    SubjectId:   "ip-policy-enforced"  // Mode encoded in ID
+    Condition:   "cidr('192.168.1.0/24').containsIP(ip(request.source_ip))"
+}
+
+// Policy modes parsed from SubjectId
+type PolicyMode string
+const (
+    PolicyModeDisabled PolicyMode = "disabled"  // Not evaluated
+    PolicyModeDryRun   PolicyMode = "dry_run"   // Log only, don't block
+    PolicyModeEnforced PolicyMode = "enforced"  // Actually block requests
+)
+
+// Dry-run handling
+if cached.Mode == PolicyModeDryRun {
+    decision.WouldBlock = !allowed
+    decision.Allowed = true  // Always allow in dry-run
+    decision.Reason = "dry-run: would have blocked"
+}
+```
+
+**CEL Examples:**
+```javascript
+// IP allowlist
+cidr('192.168.1.0/24').containsIP(ip(request.source_ip))
+
+// IP blocklist
+!cidr('10.0.0.0/8').containsIP(ip(request.source_ip))
+
+// Multiple CIDRs
+cidr('192.168.1.0/24').containsIP(ip(request.source_ip)) ||
+cidr('10.0.0.0/8').containsIP(ip(request.source_ip))
+
+// Future: product-specific policies
+request.product == "logs" && cidr('192.168.1.0/24').containsIP(ip(request.source_ip))
+```
+
+#### 2.4 Caching and Performance
+
+Hash-based cache invalidation ensures ~0.3μs evaluation:
+
+```go
+// Cache key: "orgUUID:resourceID" (e.g., "550e8400-e29b-41d4-a716-446655440000:*")
+cacheKey := fmt.Sprintf("%s:%s", orgUUID.String(), resourceID)
+
+// SHA-256 hash of serialized proto for invalidation
+policyHash := sha256.Sum256(serialized)
+
+if exists && cached.Hash == policyHash {
+    // Cache hit - use cached program (~0.3μs)
+} else {
+    // Cache miss - compile CEL (~35μs one-time)
+}
+```
+
+#### 2.5 Key Implementation Decisions
 
 **1. Temporary Self-Containment in dd-go:**
 - Innovation Week approach: evaluator directly in dd-go to avoid unmerged package dependency complexity
